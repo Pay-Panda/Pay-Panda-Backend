@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ConnectionStatus {
+  PENDING
+  ACTIVE
+  ERROR
+  DISABLED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  EXPIRED
+}
+
+enum PaymentSource {
+  API
+  DASHBOARD
+  DEFAULT_LINK
+}
+
+model User {
+  id                         String    @id @default(cuid())
+  name                       String
+  email                      String    @unique
+  mobile                     String?
+  passwordHash               String
+  emailVerifiedAt            DateTime?
+  emailVerificationTokenHash String?
+  emailVerificationExpiresAt DateTime?
+  passwordResetTokenHash     String?
+  passwordResetExpiresAt     DateTime?
+  tokenVersion               Int       @default(1)
+  loginOtpChallengeHash      String?
+  loginOtpHash               String?
+  loginOtpExpiresAt          DateTime?
+  loginOtpAttempts           Int       @default(0)
+  role                       UserRole  @default(OWNER)
+  businessId                 String
+  business                   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+}
+
+model Business {
+  id                String                @id @default(cuid())
+  name              String
+  supportEmail      String?
+  logoPath          String?
+  paymentExpiryMins Int                   @default(10)
+  payerNameMatching Boolean               @default(false)
+  webhookUrl        String?
+  webhookSecret     String?
+  theme             String                @default("midnight")
+  users             User[]
+  apiClients        ApiClient[]
+  connections       MerchantConnection[]
+  payments          Payment[]
+  providerTxns      ProviderTransaction[]
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+}
+
+model ApiClient {
+  id           String    @id @default(cuid())
+  businessId   String
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name         String
+  appId        String    @unique
+  secretHash   String
+  active       Boolean   @default(true)
+  tokenVersion Int       @default(1)
+  lastUsedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model MerchantConnection {
+  id                  String           @id @default(cuid())
+  businessId          String
+  business            Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  provider            String           @default("BHARATPE")
+  label               String?
+  mobile              String
+  encryptedToken      String
+  status              ConnectionStatus @default(PENDING)
+  merchantId          String?
+  merchantMid         String?
+  merchantName        String?
+  legalBusinessName   String?
+  category            String?
+  subCategory         String?
+  kycType             String?
+  merchantType        String?
+  merchantPaymentType String?
+  beneficiaryName     String?
+  bankName            String?
+  maskedAccountNumber String?
+  ifsc                String?
+  upiId               String?
+  baseUpiIntent       String?
+  providerQrUrl       String?
+  qrImage             Bytes?
+  rawMerchantData     Json?
+  lastConnectedAt     DateTime?
+  lastError           String?
+  isDefault           Boolean          @default(false)
+  autoSettlement      Boolean          @default(false)
+  deactivatedAt       DateTime?
+  payments            Payment[]
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  @@unique([provider, merchantId])
+  @@index([businessId, status])
+}
+
+model Payment {
+  id                    String             @id @default(cuid())
+  publicId              String             @unique
+  businessId            String
+  business              Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  connectionId          String
+  connection            MerchantConnection @relation(fields: [connectionId], references: [id])
+  clientOrderId         String
+  customerName          String?
+  customerMobile        String?
+  amount                Decimal            @db.Decimal(14, 2)
+  currency              String             @default("INR")
+  reason                String?
+  remark1               String?
+  remark2               String?
+  redirectUrl           String?
+  source                PaymentSource      @default(API)
+  status                PaymentStatus      @default(PENDING)
+  upiIntent             String
+  qrImage               Bytes
+  providerTransactionId String?            @unique
+  bankReferenceNo       String?
+  internalUtr           String?
+  payerName             String?
+  payerHandle           String?
+  paidAt                DateTime?
+  expiresAt             DateTime
+  lastCheckedAt         DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  @@unique([businessId, clientOrderId])
+  @@index([businessId, status, createdAt])
+  @@index([connectionId, status, expiresAt])
+}
+
+model ProviderTransaction {
+  id                    String   @id @default(cuid())
+  businessId            String
+  business              Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  provider              String
+  providerTransactionId String   @unique
+  merchantId            String
+  paymentTimestamp      DateTime
+  internalUtr           String?
+  bankReferenceNo       String?
+  amount                Decimal  @db.Decimal(14, 2)
+  payerName             String?
+  payerHandle           String?
+  type                  String?
+  status                String
+  payeeIdentifier       String?
+  rawData               Json
+  createdAt             DateTime @default(now())
+
+  @@index([businessId, paymentTimestamp])
+  @@index([merchantId, amount, paymentTimestamp])
+}
+
+model ApiRequestLog {
+  id         String   @id @default(cuid())
+  businessId String?
+  appId      String?
+  method     String
+  path       String
+  statusCode Int
+  requestId  String
+  ipAddress  String?
+  durationMs Int
+  createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+}
