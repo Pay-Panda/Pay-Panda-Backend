@@ -47,8 +47,13 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 app.use((req, res) => res.status(404).json({ success: false, message: 'Route not found' }));
 app.use((error, req, res, next) => {
   if (error instanceof ZodError) {
-    const message = error.issues.map(issue => issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message).join(' ');
-    return res.status(400).json({ success: false, message, errors: error.issues });
+    const fieldErrors = {};
+    for (const issue of error.issues) {
+      const field = issue.path.join('.') || 'request';
+      if (!fieldErrors[field]) fieldErrors[field] = friendlyValidationMessage(field, issue);
+    }
+    const firstMessage = Object.values(fieldErrors)[0] || 'Please check the submitted values.';
+    return res.status(400).json({ success: false, message: firstMessage, fieldErrors, errors: error.issues });
   }
   logger.error('Unhandled request error', { event: 'REQUEST_ERROR', requestId: req.id, method: req.method, path: sanitizeLogPath(req.originalUrl), ...safeError(error) });
   res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Internal server error' });
@@ -73,4 +78,14 @@ module.exports = app;
 
 function sanitizeLogPath(value) {
   return value.replace(/(\/api\/auth\/activation\/)[^?]+/i, '$1[redacted]').replace(/([?&](?:token|app_secret)=)[^&]+/gi, '$1[redacted]');
+}
+
+function friendlyValidationMessage(field, issue) {
+  const labels = { mobile: 'Mobile number', customer_mobile: 'Customer mobile', email: 'Email address', password: 'Password', confirmPassword: 'Password confirmation', amount: 'Amount', redirect_url: 'Redirect URL', order_id: 'Order ID' };
+  const label = labels[field] || field.replaceAll('_', ' ');
+  if (issue.message && !issue.message.startsWith('Invalid string')) return issue.message;
+  if (issue.code === 'invalid_type') return `${label} is required and must have the correct format.`;
+  if (issue.code === 'too_small') return `${label} is too short.`;
+  if (issue.code === 'too_big') return `${label} is too long.`;
+  return `${label} has an invalid format.`;
 }

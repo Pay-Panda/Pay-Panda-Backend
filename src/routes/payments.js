@@ -26,6 +26,25 @@ router.post('/dashboard/payments', requireDashboardAuth, asyncHandler(async (req
   res.status(created ? 201 : 200).json({ success: true, payment: publicPayment(payment) });
 }));
 
+router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res) => {
+  const input = z.object({
+    payment_id: z.string().min(10).optional(),
+    order_id: z.string().min(1).max(100).optional(),
+  }).refine(value => value.payment_id || value.order_id, { message: 'Provide payment_id or order_id.' }).parse(req.body);
+  let payment = await prisma.payment.findFirst({ where: {
+    businessId: req.auth.businessId,
+    ...(input.payment_id ? { publicId: input.payment_id } : {}),
+    ...(input.order_id ? { clientOrderId: input.order_id } : {}),
+  }, include: { connection: true } });
+  if (!payment) return res.status(404).json({ success: false, verified: false, message: 'No payment belonging to this OAuth application matches the supplied identifier.' });
+  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { connection: true } });
+  res.json({
+    success: true,
+    verified: payment.status === 'SUCCESS',
+    payment: publicPayment(payment),
+  });
+}));
+
 router.get('/v1/payments/:orderId', requireApiAuth, asyncHandler(async (req, res) => {
   let payment = await prisma.payment.findUnique({ where: {
     businessId_clientOrderId: { businessId: req.auth.businessId, clientOrderId: req.params.orderId },

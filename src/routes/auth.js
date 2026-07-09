@@ -10,6 +10,7 @@ const { requireDashboardAuth } = require('../middleware/auth');
 const { isStrongPassword, passwordMessage } = require('../lib/password');
 const { sendActivationEmail, sendPasswordResetEmail, sendLoginOtpEmail } = require('../services/emailService');
 const { logger, safeError } = require('../lib/logger');
+const { buildFrontendUrl } = require('../lib/frontendUrl');
 
 const router = express.Router();
 const authToken = user => jwt.sign({ sub: user.id, businessId: user.businessId, kind: 'user', role: user.role, ver: user.tokenVersion }, config.jwtSecret, { expiresIn: config.userAccessTokenTtl });
@@ -25,7 +26,7 @@ async function safeDeliver(sendPromise, fallbackUrl) {
 router.post('/register', asyncHandler(async (req, res) => {
   const input = z.object({
     name: z.string().min(2).max(80), businessName: z.string().min(2).max(120),
-    email: z.email(), mobile: z.string().regex(/^\+[1-9]\d{7,14}$/, 'Enter a valid mobile number with country code, e.g. +919876543210.').optional(), password: z.string().min(6).max(100),
+    email: z.email(), mobile: z.string().regex(/^(?:\+91\d{10}|\+(?!91)[1-9]\d{7,14})$/, 'For India, select +91 and enter exactly 10 digits.'), password: z.string().min(6).max(100),
   }).parse(req.body);
   if (!isStrongPassword(input.password)) return res.status(400).json({ success: false, message: passwordMessage });
   const exists = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
@@ -41,7 +42,7 @@ router.post('/register', asyncHandler(async (req, res) => {
       emailVerificationExpiresAt: new Date(Date.now() + config.emailVerificationHours * 3600000),
     }, include: { business: true } });
   });
-  const activationUrl = `${config.frontendUrl}/activate?token=${encodeURIComponent(verificationToken)}`;
+  const activationUrl = buildFrontendUrl(req, '/activate', verificationToken);
   const delivery = await safeDeliver(sendActivationEmail({ email: user.email, name: user.name, activationUrl }), activationUrl);
   logger.info('User registered; activation required', { event: 'USER_REGISTERED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), emailDelivered: delivery.delivered });
   res.status(201).json({
@@ -79,7 +80,7 @@ router.post('/resend-activation', asyncHandler(async (req, res) => {
   await prisma.user.update({ where: { id: user.id }, data: {
     emailVerificationTokenHash: hashToken(token), emailVerificationExpiresAt: new Date(Date.now() + config.emailVerificationHours * 3600000),
   }});
-  const resendActivationUrl = `${config.frontendUrl}/activate?token=${encodeURIComponent(token)}`;
+  const resendActivationUrl = buildFrontendUrl(req, '/activate', token);
   const delivery = await safeDeliver(sendActivationEmail({ email: user.email, name: user.name, activationUrl: resendActivationUrl }), resendActivationUrl);
   logger.info('Activation email reissued', { event: 'ACTIVATION_RESENT', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), emailDelivered: delivery.delivered });
   res.json({ success: true, message: 'A new activation link has been issued.', ...(process.env.NODE_ENV !== 'production' && delivery.developmentUrl ? { developmentActivationUrl: delivery.developmentUrl } : {}) });
@@ -95,7 +96,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     passwordResetTokenHash: hashToken(token),
     passwordResetExpiresAt: new Date(Date.now() + config.passwordResetMinutes * 60000),
   }});
-  const resetUrl = `${config.frontendUrl}/reset-password?token=${encodeURIComponent(token)}`;
+  const resetUrl = buildFrontendUrl(req, '/reset-password', token);
   const delivery = await safeDeliver(sendPasswordResetEmail({ email: user.email, name: user.name, resetUrl }), resetUrl);
   logger.info('Password reset requested', { event: 'PASSWORD_RESET_REQUESTED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), emailDelivered: delivery.delivered });
   res.json({ ...generic, ...(process.env.NODE_ENV !== 'production' && delivery.developmentUrl ? { developmentResetUrl: delivery.developmentUrl } : {}) });
