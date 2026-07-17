@@ -36,7 +36,7 @@ router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
     logger.info('Env super-admin login succeeded', { event: 'ENV_ADMIN_LOGIN_SUCCESS', requestId: req.id, adminId: admin.id, email: maskEmail(admin.email), ip: req.ip });
     return res.json({ success: true, token: envAdminToken(), admin });
   }
-  const admin = await prisma.adminUser.findUnique({ where: { email: input.email.toLowerCase() } });
+  const admin = await prisma.adminUser.findFirst({ where: { email: { equals: input.email, mode: 'insensitive' } } });
   if (!admin || !admin.active || !await bcrypt.compare(input.password, admin.passwordHash)) {
     logger.warn('Admin login rejected', { event: 'ADMIN_LOGIN_FAILED', requestId: req.id, email: maskEmail(input.email), ip: req.ip });
     return res.status(401).json({ success: false, message: 'Invalid email or password' });

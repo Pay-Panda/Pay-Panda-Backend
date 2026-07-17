@@ -35,6 +35,7 @@ app.use((req, res, next) => {
     const durationMs = Date.now() - started;
     const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'http';
     logger.log(level, 'Request completed', { event: 'HTTP_OUT', requestId: req.id, method: req.method, path: sanitizeLogPath(req.originalUrl), statusCode: res.statusCode, durationMs, businessId: req.auth?.businessId, appId: req.auth?.appId });
+    if (!shouldPersistRequestAudit(req)) return;
     prisma.apiRequestLog.create({ data: {
       businessId: req.auth?.businessId || null, appId: req.auth?.appId || null,
       method: req.method, path: sanitizeLogPath(req.originalUrl).slice(0, 500), statusCode: res.statusCode,
@@ -99,6 +100,12 @@ function parseCorsOrigins(value) {
 
 function sanitizeLogPath(value) {
   return value.replace(/(\/api\/auth\/activation\/)[^?]+/i, '$1[redacted]').replace(/([?&](?:token|app_secret)=)[^&]+/gi, '$1[redacted]');
+}
+
+function shouldPersistRequestAudit(req) {
+  if (req.method === 'OPTIONS') return false;
+  if (req.method === 'GET' && (req.path === '/api/health' || req.path.startsWith('/api/admin') || req.path.startsWith('/api/public'))) return false;
+  return true;
 }
 
 function friendlyValidationMessage(field, issue) {

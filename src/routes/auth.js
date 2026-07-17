@@ -29,15 +29,16 @@ router.post('/register', asyncHandler(async (req, res) => {
     email: z.email(), mobile: z.string().regex(/^(?:\+91\d{10}|\+(?!91)[1-9]\d{7,14})$/, 'For India, select +91 and enter exactly 10 digits.'), password: z.string().min(6).max(100),
   }).parse(req.body);
   if (!isStrongPassword(input.password)) return res.status(400).json({ success: false, message: passwordMessage });
-  const exists = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
+  const normalizedEmail = input.email.toLowerCase();
+  const exists = await findUserByEmail(normalizedEmail);
   if (exists) return res.status(409).json({ success: false, message: 'Email is already registered' });
   const verificationToken = crypto.randomBytes(32).toString('base64url');
   const verificationHash = hashToken(verificationToken);
   const passwordHash = await bcrypt.hash(input.password, 12);
   const user = await prisma.$transaction(async tx => {
-    const business = await tx.business.create({ data: { name: input.businessName, supportEmail: input.email.toLowerCase() } });
+    const business = await tx.business.create({ data: { name: input.businessName, supportEmail: normalizedEmail } });
     return tx.user.create({ data: {
-      name: input.name, email: input.email.toLowerCase(), mobile: input.mobile,
+      name: input.name, email: normalizedEmail, mobile: input.mobile,
       passwordHash, businessId: business.id,
       emailVerificationTokenHash: verificationHash,
       emailVerificationExpiresAt: new Date(Date.now() + config.emailVerificationHours * 3600000),
@@ -75,7 +76,7 @@ router.post('/activate', asyncHandler(async (req, res) => {
 
 router.post('/resend-activation', asyncHandler(async (req, res) => {
   const { email } = z.object({ email: z.email() }).parse(req.body);
-  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  const user = await findUserByEmail(email);
   if (!user || user.emailVerifiedAt) return res.json({ success: true, message: 'If activation is required, a new link has been sent.' });
   const token = crypto.randomBytes(32).toString('base64url');
   await prisma.user.update({ where: { id: user.id }, data: {
@@ -89,7 +90,7 @@ router.post('/resend-activation', asyncHandler(async (req, res) => {
 
 router.post('/forgot-password', asyncHandler(async (req, res) => {
   const { email } = z.object({ email: z.email() }).parse(req.body);
-  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  const user = await findUserByEmail(email);
   const generic = { success: true, message: 'If an activated account exists for this email, a password reset link has been sent.' };
   if (!user) {
     logger.warn('Password reset skipped; account not found', { event: 'PASSWORD_RESET_SKIPPED', requestId: req.id, reason: 'ACCOUNT_NOT_FOUND', email: maskEmail(email), ip: req.ip });
@@ -150,7 +151,7 @@ router.post('/change-password', requireDashboardAuth, asyncHandler(async (req, r
 
 router.post('/login', asyncHandler(async (req, res) => {
   const input = z.object({ email: z.email(), password: z.string().min(1) }).parse(req.body);
-  const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() }, include: { business: true } });
+  const user = await findUserByEmail(input.email, { business: true });
   if (!user || !await bcrypt.compare(input.password, user.passwordHash)) {
     logger.warn('Login rejected', { event: 'LOGIN_FAILED', requestId: req.id, email: maskEmail(input.email), reason: 'invalid_credentials', ip: req.ip });
     return res.status(401).json({ success: false, message: 'Invalid email or password' });
@@ -205,5 +206,13 @@ function sanitize(user) {
 
 const hashToken = token => crypto.createHash('sha256').update(token).digest('hex');
 const maskEmail = email => email.replace(/^(.{2}).*(@.*)$/, '$1•••$2');
+const emailEquals = email => ({ equals: String(email || '').trim(), mode: 'insensitive' });
+
+function findUserByEmail(email, include) {
+  return prisma.user.findFirst({
+    where: { email: emailEquals(email) },
+    ...(include ? { include } : {}),
+  });
+}
 
 module.exports = router;

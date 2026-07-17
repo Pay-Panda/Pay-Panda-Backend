@@ -26,7 +26,7 @@ const daily = filename => new winston.transports.DailyRotateFile({
 
 const logger = winston.createLogger({
   levels: winston.config.npm.levels,
-  level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+  level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
   defaultMeta: { service: 'pay-panda-api' },
   transports: [
     new winston.transports.Console({ format: consoleFormat }),
