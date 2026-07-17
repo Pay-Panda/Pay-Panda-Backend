@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { jwtSecret } = require('../config');
+const config = require('../config');
 const prisma = require('../db');
 
 function readBearer(req) {
@@ -9,7 +9,7 @@ function readBearer(req) {
 
 async function requireDashboardAuth(req, res, next) {
   try {
-    const payload = jwt.verify(readBearer(req), jwtSecret);
+    const payload = jwt.verify(readBearer(req), config.jwtSecret);
     if (payload.kind !== 'user') throw new Error('Wrong token type');
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
@@ -28,7 +28,7 @@ async function requireDashboardAuth(req, res, next) {
 
 async function requireApiAuth(req, res, next) {
   try {
-    const payload = jwt.verify(readBearer(req), jwtSecret);
+    const payload = jwt.verify(readBearer(req), config.jwtSecret);
     if (payload.kind !== 'client') throw new Error('Wrong token type');
     const client = await prisma.apiClient.findUnique({
       where: { id: payload.sub },
@@ -47,8 +47,15 @@ async function requireApiAuth(req, res, next) {
 
 async function requireAdminAuth(req, res, next) {
   try {
-    const payload = jwt.verify(readBearer(req), jwtSecret);
+    const payload = jwt.verify(readBearer(req), config.jwtSecret);
     if (payload.kind !== 'admin') throw new Error('Wrong token type');
+    if (payload.envAdmin) {
+      if (!config.superAdmin.email || !config.superAdmin.password || payload.sub !== config.superAdmin.id || payload.ver !== config.superAdmin.credentialVersion) {
+        throw new Error('Env admin session was revoked');
+      }
+      req.auth = payload;
+      return next();
+    }
     const admin = await prisma.adminUser.findUnique({ where: { id: payload.sub }, select: { active: true, tokenVersion: true } });
     if (!admin?.active || admin.tokenVersion !== payload.ver) throw new Error('Admin session was revoked');
     req.auth = payload;

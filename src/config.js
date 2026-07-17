@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const required = ['DATABASE_URL', 'JWT_SECRET', 'TOKEN_ENCRYPTION_KEY'];
@@ -31,4 +32,13 @@ module.exports = {
   emailVerificationHours: Number(process.env.EMAIL_VERIFICATION_HOURS || 24),
   passwordResetMinutes: Number(process.env.PASSWORD_RESET_MINUTES || 30),
   loginOtpMinutes: Number(process.env.LOGIN_OTP_MINUTES || 10),
+  superAdmin: {
+    id: 'env-super-admin',
+    email: process.env.SUPER_ADMIN_EMAIL?.toLowerCase() || '',
+    password: process.env.SUPER_ADMIN_PASSWORD || '',
+    name: process.env.SUPER_ADMIN_NAME || 'Super Admin',
+    credentialVersion: crypto.createHash('sha256')
+      .update(`${process.env.SUPER_ADMIN_EMAIL?.toLowerCase() || ''}:${process.env.SUPER_ADMIN_PASSWORD || ''}:${process.env.JWT_SECRET}`)
+      .digest('hex'),
+  },
 };
