@@ -91,14 +91,20 @@ router.post('/resend-activation', asyncHandler(async (req, res) => {
 router.post('/forgot-password', asyncHandler(async (req, res) => {
   const { email } = z.object({ email: z.email() }).parse(req.body);
   const user = await findUserByEmail(email);
-  const generic = { success: true, message: 'If an activated account exists for this email, a password reset link has been sent.' };
+  const generic = { success: true, message: 'If an account exists for this email, a password reset link has been sent.' };
   if (!user) {
     logger.warn('Password reset skipped; account not found', { event: 'PASSWORD_RESET_SKIPPED', requestId: req.id, reason: 'ACCOUNT_NOT_FOUND', email: maskEmail(email), ip: req.ip });
     return res.json(generic);
   }
   if (!user.emailVerifiedAt) {
-    logger.warn('Password reset skipped; account is not activated', { event: 'PASSWORD_RESET_SKIPPED', requestId: req.id, reason: 'ACCOUNT_NOT_ACTIVATED', userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ip: req.ip });
-    return res.json(generic);
+    logger.warn('Password reset requested for unactivated account; reset will activate account', {
+      event: 'PASSWORD_RESET_FOR_UNACTIVATED',
+      requestId: req.id,
+      userId: user.id,
+      businessId: user.businessId,
+      email: maskEmail(user.email),
+      ip: req.ip,
+    });
   }
   const token = crypto.randomBytes(32).toString('base64url');
   await prisma.user.update({ where: { id: user.id }, data: {
@@ -126,11 +132,16 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({ success: false, message: 'Password reset link is invalid or has already been used.' });
   if (user.passwordResetExpiresAt < new Date()) return res.status(410).json({ success: false, message: 'Password reset link has expired. Request a new one.' });
   if (await bcrypt.compare(input.password, user.passwordHash)) return res.status(400).json({ success: false, message: 'Choose a password different from your current password.' });
+  const activatedDuringReset = !user.emailVerifiedAt;
   await prisma.user.update({ where: { id: user.id }, data: {
     passwordHash: await bcrypt.hash(input.password, 12), passwordResetTokenHash: null,
-    passwordResetExpiresAt: null, tokenVersion: { increment: 1 },
+    passwordResetExpiresAt: null,
+    emailVerifiedAt: user.emailVerifiedAt || new Date(),
+    emailVerificationTokenHash: null,
+    emailVerificationExpiresAt: null,
+    tokenVersion: { increment: 1 },
   }});
-  logger.warn('Password reset completed; sessions revoked', { event: 'PASSWORD_RESET_COMPLETED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email) });
+  logger.warn('Password reset completed; sessions revoked', { event: 'PASSWORD_RESET_COMPLETED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), activatedDuringReset });
   res.json({ success: true, message: 'Password reset successfully. Sign in with your new password.' });
 }));
 
