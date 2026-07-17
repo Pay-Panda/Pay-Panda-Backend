@@ -148,6 +148,13 @@ router.get('/subscription', asyncHandler(async (req, res) => {
   res.json({ success: true, usage, feeTiers: TIERS });
 }));
 
+router.post('/subscription/trial/activate', asyncHandler(async (req, res) => {
+  const trial = await subscriptionService.activateTrial(req.auth.businessId);
+  const usage = await subscriptionService.getUsageSummary(req.auth.businessId);
+  logger.info('Subscription trial activated from dashboard', { event: 'DASHBOARD_TRIAL_ACTIVATED', requestId: req.id, businessId: req.auth.businessId });
+  res.status(201).json({ success: true, trial, usage });
+}));
+
 router.get('/subscription/invoices', asyncHandler(async (req, res) => {
   const invoices = await subscriptionService.listInvoices(req.auth.businessId);
   res.json({ success: true, invoices });

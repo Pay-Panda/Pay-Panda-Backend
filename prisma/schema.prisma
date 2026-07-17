@@ -75,6 +75,8 @@ model Business {
   theme             String                @default("midnight")
   checkoutLayout    String                @default("both")
   isPlatform        Boolean               @default(false)
+  trialActivatedAt  DateTime?
+  trialEndsAt       DateTime?
   planId            String?
   plan              Plan?                 @relation(fields: [planId], references: [id])
   suspendedAt       DateTime?

@@ -2,6 +2,9 @@ const prisma = require('../db');
 const { createPayment, publicPayment } = require('./paymentService');
 const { logger } = require('../lib/logger');
 
+const TRIAL_DAYS = 14;
+const TRIAL_PAYMENT_LIMIT = 100;
+
 function monthRange(date) {
   const periodStart = new Date(date.getFullYear(), date.getMonth(), 1);
   const periodEnd = new Date(date.getFullYear(), date.getMonth() + 1, 1);
@@ -11,17 +14,67 @@ function monthRange(date) {
 async function getUsageSummary(businessId) {
   const business = await prisma.business.findUnique({ where: { id: businessId }, include: { plan: true } });
   const { periodStart, periodEnd } = monthRange(new Date());
-  const [paymentCount, feeAgg] = await Promise.all([
+  const trial = await getTrialSummary(businessId, business, new Date());
+  const [paymentCount, feeAgg, freeTrialPaymentCount] = await Promise.all([
     prisma.payment.count({ where: { businessId, status: 'SUCCESS', paidAt: { gte: periodStart, lt: periodEnd } } }),
     prisma.payment.aggregate({ where: { businessId, status: 'SUCCESS', paidAt: { gte: periodStart, lt: periodEnd } }, _sum: { platformFeeAmount: true } }),
+    trial.activated ? prisma.payment.count({ where: { businessId, status: 'SUCCESS', platformFeeAmount: 0, paidAt: { gte: business.trialActivatedAt, lt: business.trialEndsAt } } }) : Promise.resolve(0),
   ]);
   return {
     plan: business.plan,
     period: { start: periodStart, end: periodEnd },
     paymentCount,
+    billablePaymentCount: Math.max(0, paymentCount - freeTrialPaymentCount),
     monthlyPaymentLimit: business.plan?.monthlyPaymentLimit ?? null,
     accruedFeeAmount: Number(feeAgg._sum.platformFeeAmount || 0),
+    trial: { ...trial, freePaymentCount: freeTrialPaymentCount },
   };
+}
+
+async function getTrialSummary(businessId, business, at = new Date()) {
+  const activated = Boolean(business?.trialActivatedAt && business?.trialEndsAt);
+  if (!activated) return { activated: false, active: false, eligible: true, freePaymentLimit: TRIAL_PAYMENT_LIMIT, freePaymentCount: 0, remainingPayments: TRIAL_PAYMENT_LIMIT, activatedAt: null, endsAt: null };
+  const used = await prisma.payment.count({ where: { businessId, status: 'SUCCESS', platformFeeAmount: 0, paidAt: { gte: business.trialActivatedAt, lt: business.trialEndsAt } } });
+  const active = at < business.trialEndsAt && used < TRIAL_PAYMENT_LIMIT;
+  return {
+    activated: true,
+    active,
+    eligible: false,
+    freePaymentLimit: TRIAL_PAYMENT_LIMIT,
+    freePaymentCount: used,
+    remainingPayments: Math.max(0, TRIAL_PAYMENT_LIMIT - used),
+    activatedAt: business.trialActivatedAt,
+    endsAt: business.trialEndsAt,
+  };
+}
+
+async function activateTrial(businessId) {
+  const business = await prisma.business.findUnique({ where: { id: businessId }, select: { id: true, trialActivatedAt: true, trialEndsAt: true } });
+  if (!business) throw Object.assign(new Error('Business not found'), { statusCode: 404 });
+  if (business.trialActivatedAt) throw Object.assign(new Error('Free trial has already been activated for this business.'), { statusCode: 409 });
+  const activatedAt = new Date();
+  const trialEndsAt = new Date(activatedAt.getTime() + TRIAL_DAYS * 86400000);
+  const updated = await prisma.business.update({ where: { id: businessId }, data: { trialActivatedAt: activatedAt, trialEndsAt } });
+  logger.info('Free trial activated', { event: 'SUBSCRIPTION_TRIAL_ACTIVATED', businessId, trialEndsAt, freePaymentLimit: TRIAL_PAYMENT_LIMIT });
+  return getTrialSummary(businessId, updated, activatedAt);
+}
+
+async function computePlatformFee(businessId, paidAt) {
+  const business = await prisma.business.findUnique({ where: { id: businessId }, select: { isPlatform: true, trialActivatedAt: true, trialEndsAt: true } });
+  if (!business || business.isPlatform) return null;
+  if (business.trialActivatedAt && business.trialEndsAt && paidAt >= business.trialActivatedAt && paidAt < business.trialEndsAt) {
+    const trialUsedBeforeThisPayment = await prisma.payment.count({
+      where: { businessId, status: 'SUCCESS', platformFeeAmount: 0, paidAt: { gte: business.trialActivatedAt, lt: business.trialEndsAt } },
+    });
+    if (trialUsedBeforeThisPayment < TRIAL_PAYMENT_LIMIT) return 0;
+  }
+  const periodStart = new Date(paidAt.getFullYear(), paidAt.getMonth(), 1);
+  const periodEnd = new Date(paidAt.getFullYear(), paidAt.getMonth() + 1, 1);
+  const priorBillableCount = await prisma.payment.count({
+    where: { businessId, status: 'SUCCESS', paidAt: { gte: periodStart, lt: periodEnd }, platformFeeAmount: { gt: 0 } },
+  });
+  const { feeForCount } = require('../lib/feeTiers');
+  return feeForCount(priorBillableCount + 1);
 }
 
 /** Idempotently creates a PENDING invoice for the most recently completed calendar
@@ -95,4 +148,4 @@ async function listInvoices(businessId) {
   return withPayments;
 }
 
-module.exports = { getUsageSummary, ensurePreviousMonthInvoice, createInvoiceCollectionPayment, syncInvoiceStatus, listInvoices };
+module.exports = { getUsageSummary, activateTrial, computePlatformFee, ensurePreviousMonthInvoice, createInvoiceCollectionPayment, syncInvoiceStatus, listInvoices };
