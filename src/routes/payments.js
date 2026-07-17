@@ -30,11 +30,13 @@ router.post('/dashboard/payments', requireDashboardAuth, asyncHandler(async (req
 router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res) => {
   const input = z.object({
     payment_id: z.string().min(10).optional(),
+    pay_panda_payment_id: z.string().min(10).optional(),
     order_id: z.string().min(1).max(100).optional(),
-  }).refine(value => value.payment_id || value.order_id, { message: 'Provide payment_id or order_id.' }).parse(req.body);
+  }).refine(value => value.payment_id || value.pay_panda_payment_id || value.order_id, { message: 'Provide payment_id, pay_panda_payment_id or order_id.' }).parse(req.body);
+  const paymentId = input.payment_id || input.pay_panda_payment_id;
   let payment = await prisma.payment.findFirst({ where: {
     businessId: req.auth.businessId,
-    ...(input.payment_id ? { publicId: input.payment_id } : {}),
+    ...(paymentId ? { publicId: paymentId } : {}),
     ...(input.order_id ? { clientOrderId: input.order_id } : {}),
   }, include: { businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, verified: false, message: 'No payment belonging to this OAuth application matches the supplied identifier.' });

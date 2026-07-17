@@ -51,7 +51,9 @@ async function createPayment(businessId, input, source = 'API') {
 }
 
 function publicPayment(payment) {
-  return {
+  const checkoutUrl = `${publicAppUrl}/pay/${payment.publicId}`;
+  const qrPath = `/api/public/payments/${payment.publicId}/qr`;
+  const payload = {
     id: payment.publicId,
     orderId: payment.clientOrderId,
     amount: Number(payment.amount),
@@ -70,8 +72,8 @@ function publicPayment(payment) {
     upiIntent: payment.upiIntent,
     expiresAt: payment.expiresAt,
     createdAt: payment.createdAt,
-    checkoutUrl: `${publicAppUrl}/pay/${payment.publicId}`,
-    qrPath: `/api/public/payments/${payment.publicId}/qr`,
+    checkoutUrl,
+    qrPath,
     provider: payment.connection?.provider,
     businessUnit: payment.businessUnit ? {
       id: payment.businessUnit.id,
@@ -83,6 +85,23 @@ function publicPayment(payment) {
       mobile: payment.connection.mobile,
       upiId: payment.connection.upiId,
     } : undefined,
+  };
+  return {
+    ...payload,
+    payment_id: payload.id,
+    order_id: payload.orderId,
+    customer_name: payload.customerName,
+    customer_mobile: payload.customerMobile,
+    bank_rrn: payload.bankReferenceNo,
+    payer_name: payload.payerName,
+    payer_handle: payload.payerHandle,
+    paid_at: payload.paidAt,
+    redirect_url: payload.redirectUrl,
+    checkout_url: checkoutUrl,
+    qr_path: qrPath,
+    expires_at: payload.expiresAt,
+    created_at: payload.createdAt,
+    business_unit: payload.businessUnit ? { ...payload.businessUnit } : undefined,
   };
 }
 

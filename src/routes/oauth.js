@@ -21,7 +21,15 @@ router.post('/token', asyncHandler(async (req, res) => {
   const accessToken = jwt.sign({ sub: client.id, appId: client.appId, businessId: client.businessId, kind: 'client', ver: client.tokenVersion }, config.jwtSecret, { expiresIn: config.accessTokenTtl });
   await prisma.apiClient.update({ where: { id: client.id }, data: { lastUsedAt: new Date() } });
   logger.info('OAuth access token issued', { event: 'OAUTH_TOKEN_ISSUED', requestId: req.id, businessId: client.businessId, clientId: client.id, appId: client.appId, ip: req.ip });
-  res.json({ access_token: accessToken, token_type: 'Bearer', expires_in: 900 });
+  res.json({ access_token: accessToken, token_type: 'Bearer', expires_in: ttlSeconds(config.accessTokenTtl) });
 }));
 
 module.exports = router;
+
+function ttlSeconds(value) {
+  const match = String(value || '').trim().match(/^(\d+)([smhd])?$/i);
+  if (!match) return 900;
+  const amount = Number(match[1]);
+  const unit = (match[2] || 's').toLowerCase();
+  return amount * ({ s: 1, m: 60, h: 3600, d: 86400 }[unit] || 1);
+}
