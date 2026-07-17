@@ -91,18 +91,81 @@ router.get('/businesses', asyncHandler(async (req, res) => {
 }));
 
 router.get('/businesses/:id', asyncHandler(async (req, res) => {
+  const businessId = req.params.id;
   const business = await prisma.business.findUnique({
-    where: { id: req.params.id },
+    where: { id: businessId },
     include: {
       plan: true,
-      users: { select: { id: true, name: true, email: true, role: true, emailVerifiedAt: true, createdAt: true } },
-      connections: { select: { id: true, provider: true, label: true, status: true, merchantName: true, createdAt: true } },
-      _count: { select: { payments: true } },
+      users: { select: { id: true, name: true, email: true, mobile: true, role: true, emailVerifiedAt: true, createdAt: true } },
+      businessUnits: {
+        orderBy: [{ active: 'desc' }, { createdAt: 'desc' }],
+        include: { _count: { select: { payments: true } } },
+      },
+      connections: {
+        orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+        select: {
+          id: true, provider: true, label: true, status: true, mobile: true, merchantId: true, merchantMid: true,
+          merchantName: true, legalBusinessName: true, beneficiaryName: true, bankName: true, maskedAccountNumber: true,
+          ifsc: true, upiId: true, autoSettlement: true, isDefault: true, lastConnectedAt: true, lastError: true,
+          deactivatedAt: true, createdAt: true,
+        },
+      },
+      apiClients: { orderBy: { createdAt: 'desc' }, select: { id: true, name: true, appId: true, active: true, lastUsedAt: true, createdAt: true } },
+      defaultLink: { select: { slug: true, label: true, active: true, minAmount: true, maxAmount: true, createdAt: true } },
+      _count: { select: { payments: true, businessUnits: true, apiClients: true } },
     },
   });
   if (!business) return res.status(404).json({ success: false, message: 'Business not found' });
-  const paymentTotals = await prisma.payment.aggregate({ where: { businessId: business.id, status: 'SUCCESS' }, _sum: { amount: true }, _count: true });
-  res.json({ success: true, business, paymentTotals: { count: paymentTotals._count, amount: Number(paymentTotals._sum.amount || 0) } });
+  const [paymentTotals, statusGroups, unitGroups, recentPayments, recentProviderTransactions] = await Promise.all([
+    prisma.payment.aggregate({ where: { businessId, status: 'SUCCESS' }, _sum: { amount: true }, _count: true }),
+    prisma.payment.groupBy({ by: ['status'], where: { businessId }, _count: true, _sum: { amount: true } }),
+    prisma.payment.groupBy({ by: ['businessUnitId'], where: { businessId }, _count: true, _sum: { amount: true } }),
+    prisma.payment.findMany({
+      where: { businessId },
+      orderBy: { createdAt: 'desc' },
+      take: 25,
+      select: {
+        id: true, publicId: true, businessUnitId: true, clientOrderId: true, customerName: true, customerMobile: true,
+        amount: true, currency: true, reason: true, source: true, status: true, bankReferenceNo: true, internalUtr: true,
+        payerName: true, payerHandle: true, paidAt: true, expiresAt: true, createdAt: true,
+        businessUnit: { select: { id: true, name: true, code: true } },
+        connection: { select: { id: true, provider: true, label: true, merchantId: true, legalBusinessName: true } },
+      },
+    }),
+    prisma.providerTransaction.findMany({
+      where: { businessId },
+      orderBy: { paymentTimestamp: 'desc' },
+      take: 15,
+      select: {
+        id: true, provider: true, merchantId: true, providerTransactionId: true, paymentTimestamp: true,
+        bankReferenceNo: true, amount: true, payerName: true, payerHandle: true, type: true, status: true, payeeIdentifier: true,
+      },
+    }),
+  ]);
+
+  const unitTotalsById = Object.fromEntries(unitGroups.map(row => [row.businessUnitId || 'main', {
+    count: row._count,
+    amount: Number(row._sum.amount || 0),
+  }]));
+  const businessUnits = business.businessUnits.map(unit => ({
+    ...unit,
+    totals: unitTotalsById[unit.id] || { count: 0, amount: 0 },
+  }));
+  const mainUnitTotals = unitTotalsById.main || { count: 0, amount: 0 };
+  const paymentStatusBreakdown = Object.fromEntries(statusGroups.map(row => [row.status, {
+    count: row._count,
+    amount: Number(row._sum.amount || 0),
+  }]));
+
+  res.json({
+    success: true,
+    business: { ...business, businessUnits },
+    paymentTotals: { count: paymentTotals._count, amount: Number(paymentTotals._sum.amount || 0) },
+    paymentStatusBreakdown,
+    mainUnitTotals,
+    recentPayments,
+    recentProviderTransactions,
+  });
 }));
 
 router.patch('/businesses/:id/suspend', asyncHandler(async (req, res) => {

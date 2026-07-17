@@ -16,14 +16,21 @@ router.use(requireDashboardAuth);
 router.get('/summary', asyncHandler(async (req, res) => {
   await expirePendingPayments();
   const businessId = req.auth.businessId;
+  const unitId = req.query.business_unit_id || undefined;
+  const unitWhere = unitId ? { businessUnitId: unitId } : {};
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const [groups, total, connections] = await Promise.all([
-    prisma.payment.groupBy({ by: ['status'], where: { businessId, createdAt: { gte: today } }, _count: true, _sum: { amount: true } }),
-    prisma.payment.aggregate({ where: { businessId, status: 'SUCCESS' }, _sum: { amount: true }, _count: true }),
+  if (unitId) {
+    const unit = await prisma.businessUnit.findFirst({ where: { id: unitId, businessId } });
+    if (!unit) return res.status(404).json({ success: false, message: 'Sub-business not found' });
+  }
+  const [groups, total, connections, units] = await Promise.all([
+    prisma.payment.groupBy({ by: ['status'], where: { businessId, ...unitWhere, createdAt: { gte: today } }, _count: true, _sum: { amount: true } }),
+    prisma.payment.aggregate({ where: { businessId, ...unitWhere, status: 'SUCCESS' }, _sum: { amount: true }, _count: true }),
     prisma.merchantConnection.count({ where: { businessId, status: 'ACTIVE' } }),
+    prisma.businessUnit.findMany({ where: { businessId, active: true }, orderBy: { createdAt: 'asc' } }),
   ]);
   const stats = Object.fromEntries(groups.map(row => [row.status, { count: row._count, amount: Number(row._sum.amount || 0) }]));
-  res.json({ success: true, summary: { today: stats, lifetime: { count: total._count, amount: Number(total._sum.amount || 0) }, activeConnections: connections } });
+  res.json({ success: true, summary: { today: stats, lifetime: { count: total._count, amount: Number(total._sum.amount || 0) }, activeConnections: connections, businessUnits: units } });
 }));
 
 router.get('/payments', asyncHandler(async (req, res) => {
@@ -31,15 +38,20 @@ router.get('/payments', asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
   const status = req.query.status && ['PENDING', 'SUCCESS', 'FAILED', 'EXPIRED'].includes(req.query.status) ? req.query.status : undefined;
+  const unitId = req.query.business_unit_id || undefined;
+  if (unitId) {
+    const unit = await prisma.businessUnit.findFirst({ where: { id: unitId, businessId: req.auth.businessId } });
+    if (!unit) return res.status(404).json({ success: false, message: 'Sub-business not found' });
+  }
   const from = req.query.from ? new Date(req.query.from) : null;
   const to = req.query.to ? new Date(req.query.to) : null;
   const validFrom = from && !Number.isNaN(from.getTime()) ? from : null;
   const validTo = to && !Number.isNaN(to.getTime()) ? to : null;
-  const where = { businessId: req.auth.businessId, ...(status ? { status } : {}),
+  const where = { businessId: req.auth.businessId, ...(unitId ? { businessUnitId: unitId } : {}), ...(status ? { status } : {}),
     ...((validFrom || validTo) ? { createdAt: { ...(validFrom ? { gte: validFrom } : {}), ...(validTo ? { lte: validTo } : {}) } } : {}),
   };
   const [items, total, collection] = await Promise.all([
-    prisma.payment.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit, include: { connection: { select: { legalBusinessName: true, merchantId: true, provider: true } } } }),
+    prisma.payment.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit, include: { businessUnit: { select: { id: true, name: true, code: true } }, connection: { select: { legalBusinessName: true, merchantId: true, provider: true } } } }),
     prisma.payment.count({ where }),
     prisma.payment.aggregate({ where: { ...where, status: 'SUCCESS' }, _sum: { amount: true }, _count: true }),
   ]);
@@ -50,6 +62,57 @@ router.patch('/settings', asyncHandler(async (req, res) => {
   const { paymentExpiryMins } = z.object({ paymentExpiryMins: z.coerce.number().int().min(1).max(60) }).parse(req.body);
   const business = await prisma.business.update({ where: { id: req.auth.businessId }, data: { paymentExpiryMins } });
   res.json({ success: true, business });
+}));
+
+// ---- Business units / sub-businesses -----------------------------------
+
+const unitInput = z.object({
+  name: z.string().min(2).max(100),
+  code: z.string().min(2).max(40).regex(/^[a-z0-9][a-z0-9_-]*$/i, 'Use letters, numbers, dash or underscore.'),
+  description: z.string().max(250).optional().nullable(),
+  active: z.boolean().optional(),
+});
+
+router.get('/business-units', asyncHandler(async (req, res) => {
+  const units = await prisma.businessUnit.findMany({
+    where: { businessId: req.auth.businessId },
+    orderBy: [{ active: 'desc' }, { createdAt: 'asc' }],
+    include: { _count: { select: { payments: true } } },
+  });
+  res.json({ success: true, units });
+}));
+
+router.post('/business-units', asyncHandler(async (req, res) => {
+  const input = unitInput.parse(req.body);
+  const code = input.code.toLowerCase();
+  const exists = await prisma.businessUnit.findUnique({ where: { businessId_code: { businessId: req.auth.businessId, code } } });
+  if (exists) return res.status(409).json({ success: false, message: 'A sub-business with this code already exists.' });
+  const unit = await prisma.businessUnit.create({
+    data: { businessId: req.auth.businessId, name: input.name, code, description: input.description || null, active: input.active ?? true },
+  });
+  logger.info('Business unit created', { event: 'BUSINESS_UNIT_CREATED', requestId: req.id, businessId: req.auth.businessId, businessUnitId: unit.id, code: unit.code });
+  res.status(201).json({ success: true, unit });
+}));
+
+router.patch('/business-units/:id', asyncHandler(async (req, res) => {
+  const input = unitInput.partial().parse(req.body);
+  const existing = await prisma.businessUnit.findFirst({ where: { id: req.params.id, businessId: req.auth.businessId } });
+  if (!existing) return res.status(404).json({ success: false, message: 'Sub-business not found' });
+  if (input.code) {
+    const codeExists = await prisma.businessUnit.findFirst({ where: { businessId: req.auth.businessId, code: input.code.toLowerCase(), id: { not: existing.id } } });
+    if (codeExists) return res.status(409).json({ success: false, message: 'A sub-business with this code already exists.' });
+  }
+  const unit = await prisma.businessUnit.update({
+    where: { id: existing.id },
+    data: {
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.code ? { code: input.code.toLowerCase() } : {}),
+      ...(input.description !== undefined ? { description: input.description || null } : {}),
+      ...(input.active !== undefined ? { active: input.active } : {}),
+    },
+  });
+  logger.info('Business unit updated', { event: 'BUSINESS_UNIT_UPDATED', requestId: req.id, businessId: req.auth.businessId, businessUnitId: unit.id, active: unit.active });
+  res.json({ success: true, unit });
 }));
 
 router.get('/provider-transactions', asyncHandler(async (req, res) => {

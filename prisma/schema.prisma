@@ -83,12 +83,29 @@ model Business {
   users             User[]
   apiClients        ApiClient[]
   connections       MerchantConnection[]
+  businessUnits     BusinessUnit[]
   payments          Payment[]
   providerTxns      ProviderTransaction[]
   invoices          SubscriptionInvoice[]
   defaultLink       DefaultLink?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
+}
+
+model BusinessUnit {
+  id          String    @id @default(cuid())
+  businessId  String
+  business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name        String
+  code        String
+  description String?
+  active      Boolean   @default(true)
+  payments    Payment[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([businessId, code])
+  @@index([businessId, active])
 }
 
 model AdminUser {
@@ -175,6 +192,8 @@ model Payment {
   publicId              String             @unique
   businessId            String
   business              Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  businessUnitId        String?
+  businessUnit          BusinessUnit?      @relation(fields: [businessUnitId], references: [id], onDelete: SetNull)
   connectionId          String
   connection            MerchantConnection @relation(fields: [connectionId], references: [id])
   clientOrderId         String
@@ -204,6 +223,7 @@ model Payment {
 
   @@unique([businessId, clientOrderId])
   @@index([businessId, status, createdAt])
+  @@index([businessUnitId, status, createdAt])
   @@index([connectionId, status, expiresAt])
 }
 

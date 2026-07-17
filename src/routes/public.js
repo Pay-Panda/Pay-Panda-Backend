@@ -10,17 +10,17 @@ const { syncPublicPayment } = require('../services/poller');
 const router = express.Router();
 
 router.get('/payments/:publicId', asyncHandler(async (req, res) => {
-  let payment = await prisma.payment.findUnique({ where: { publicId: req.params.publicId }, include: { business: true, connection: true } });
+  let payment = await prisma.payment.findUnique({ where: { publicId: req.params.publicId }, include: { business: true, businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
   if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) {
-    payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { business: true, connection: true } });
+    payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { business: true, businessUnit: true, connection: true } });
   }
   if (payment.status === 'PENDING') {
     await syncPublicPayment(payment.publicId);
-    payment = await prisma.payment.findUnique({ where: { publicId: req.params.publicId }, include: { business: true, connection: true } });
+    payment = await prisma.payment.findUnique({ where: { publicId: req.params.publicId }, include: { business: true, businessUnit: true, connection: true } });
   }
   res.set('Cache-Control', 'no-store').json({ success: true, payment: {
-    ...publicPayment(payment), business: { name: payment.business.name, theme: payment.business.theme, checkoutLayout: payment.business.checkoutLayout, logoPath: payment.business.logoPath },
+    ...publicPayment(payment), business: { name: payment.businessUnit?.name || payment.business.name, parentName: payment.business.name, theme: payment.business.theme, checkoutLayout: payment.business.checkoutLayout, logoPath: payment.business.logoPath },
   }});
 }));
 

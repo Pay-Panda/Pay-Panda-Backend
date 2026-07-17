@@ -11,6 +11,7 @@ const schema = z.object({
   customer_name: z.string().max(100).optional(), customer_mobile: z.string().regex(/^\d{6,15}$/, 'Enter a valid mobile number (6 to 15 digits, no country code).').optional(),
   reason: z.string().max(180).optional(), remark1: z.string().max(200).optional(),
   remark2: z.string().max(200).optional(), redirect_url: z.url().optional(), connection_id: z.string().optional(),
+  business_unit_id: z.string().optional(), business_unit_code: z.string().max(60).optional(),
   expires_in_minutes: z.coerce.number().int().min(1).max(60).optional(),
 });
 
@@ -35,9 +36,9 @@ router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res)
     businessId: req.auth.businessId,
     ...(input.payment_id ? { publicId: input.payment_id } : {}),
     ...(input.order_id ? { clientOrderId: input.order_id } : {}),
-  }, include: { connection: true } });
+  }, include: { businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, verified: false, message: 'No payment belonging to this OAuth application matches the supplied identifier.' });
-  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { connection: true } });
+  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
   res.json({
     success: true,
     verified: payment.status === 'SUCCESS',
@@ -48,16 +49,16 @@ router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res)
 router.get('/v1/payments/:orderId', requireApiAuth, asyncHandler(async (req, res) => {
   let payment = await prisma.payment.findUnique({ where: {
     businessId_clientOrderId: { businessId: req.auth.businessId, clientOrderId: req.params.orderId },
-  }});
+  }, include: { businessUnit: true, connection: true }});
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
-  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' } });
+  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
   res.json({ success: true, payment: publicPayment(payment) });
 }));
 
 router.get('/v1/payments/id/:paymentId', requireApiAuth, asyncHandler(async (req, res) => {
-  let payment = await prisma.payment.findFirst({ where: { publicId: req.params.paymentId, businessId: req.auth.businessId } });
+  let payment = await prisma.payment.findFirst({ where: { publicId: req.params.paymentId, businessId: req.auth.businessId }, include: { businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
-  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' } });
+  if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
   res.json({ success: true, payment: publicPayment(payment) });
 }));
 
@@ -66,6 +67,7 @@ function map(input) {
     orderId: input.order_id, amount: input.amount, customerName: input.customer_name,
     customerMobile: input.customer_mobile, reason: input.reason, remark1: input.remark1,
     remark2: input.remark2, redirectUrl: input.redirect_url, connectionId: input.connection_id,
+    businessUnitId: input.business_unit_id, businessUnitCode: input.business_unit_code,
     expiresInMinutes: input.expires_in_minutes,
   };
 }
