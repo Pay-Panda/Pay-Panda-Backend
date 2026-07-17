@@ -9,6 +9,12 @@ const router = express.Router();
 router.use(requireAdminAuth);
 const ADMIN_CACHE_MS = 15000;
 const cache = new Map();
+const businessUnitInput = z.object({
+  name: z.string().min(2).max(100),
+  code: z.string().min(2).max(40).regex(/^[a-z0-9][a-z0-9_-]*$/i, 'Use letters, numbers, dash or underscore.'),
+  description: z.string().max(250).optional().nullable(),
+  active: z.boolean().optional(),
+});
 
 // ---- Insights ----------------------------------------------------------
 
@@ -210,6 +216,45 @@ router.patch('/businesses/:id/platform', asyncHandler(async (req, res) => {
   clearAdminCache();
   logger.warn('Business platform designation changed by admin', { event: 'ADMIN_BUSINESS_PLATFORM_CHANGED', requestId: req.id, adminId: req.auth.sub, businessId: business.id, isPlatform });
   res.json({ success: true, business });
+}));
+
+router.post('/businesses/:id/business-units', asyncHandler(async (req, res) => {
+  const input = businessUnitInput.parse(req.body);
+  const business = await prisma.business.findUnique({ where: { id: req.params.id }, select: { id: true } });
+  if (!business) return res.status(404).json({ success: false, message: 'Business not found' });
+  const code = input.code.toLowerCase();
+  const exists = await prisma.businessUnit.findUnique({ where: { businessId_code: { businessId: business.id, code } } });
+  if (exists) return res.status(409).json({ success: false, message: 'A sub-business with this code already exists.' });
+  const unit = await prisma.businessUnit.create({
+    data: { businessId: business.id, name: input.name, code, description: input.description || null, active: input.active ?? true },
+    include: { _count: { select: { payments: true } } },
+  });
+  clearAdminCache();
+  logger.info('Business unit created by admin', { event: 'ADMIN_BUSINESS_UNIT_CREATED', requestId: req.id, adminId: req.auth.sub, businessId: business.id, businessUnitId: unit.id, code: unit.code });
+  res.status(201).json({ success: true, unit: { ...unit, totals: { count: 0, amount: 0 } } });
+}));
+
+router.patch('/businesses/:id/business-units/:unitId', asyncHandler(async (req, res) => {
+  const input = businessUnitInput.partial().parse(req.body);
+  const existing = await prisma.businessUnit.findFirst({ where: { id: req.params.unitId, businessId: req.params.id } });
+  if (!existing) return res.status(404).json({ success: false, message: 'Sub-business not found' });
+  if (input.code) {
+    const codeExists = await prisma.businessUnit.findFirst({ where: { businessId: req.params.id, code: input.code.toLowerCase(), id: { not: existing.id } } });
+    if (codeExists) return res.status(409).json({ success: false, message: 'A sub-business with this code already exists.' });
+  }
+  const unit = await prisma.businessUnit.update({
+    where: { id: existing.id },
+    data: {
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.code ? { code: input.code.toLowerCase() } : {}),
+      ...(input.description !== undefined ? { description: input.description || null } : {}),
+      ...(input.active !== undefined ? { active: input.active } : {}),
+    },
+    include: { _count: { select: { payments: true } } },
+  });
+  clearAdminCache();
+  logger.info('Business unit updated by admin', { event: 'ADMIN_BUSINESS_UNIT_UPDATED', requestId: req.id, adminId: req.auth.sub, businessId: req.params.id, businessUnitId: unit.id, active: unit.active });
+  res.json({ success: true, unit });
 }));
 
 // ---- Plans ---------------------------------------------------------------
