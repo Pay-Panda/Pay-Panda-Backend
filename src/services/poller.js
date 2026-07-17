@@ -2,11 +2,21 @@ const prisma = require('../db');
 const config = require('../config');
 const { decrypt } = require('../lib/crypto');
 const bharatpe = require('../providers/bharatpe');
+const { feeForCount } = require('../lib/feeTiers');
 const { logger, safeError } = require('../lib/logger');
 
 const liveChecks = new Map();
 let reconciliationRunning = false;
 const normalizeName = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+async function computePlatformFee(businessId, paidAt) {
+  const periodStart = new Date(paidAt.getFullYear(), paidAt.getMonth(), 1);
+  const periodEnd = new Date(paidAt.getFullYear(), paidAt.getMonth() + 1, 1);
+  const priorCount = await prisma.payment.count({
+    where: { businessId, status: 'SUCCESS', paidAt: { gte: periodStart, lt: periodEnd } },
+  });
+  return feeForCount(priorCount + 1);
+}
 
 async function expirePendingPayments() {
   const expired = await prisma.payment.updateMany({ where: { status: 'PENDING', expiresAt: { lte: new Date() } }, data: { status: 'EXPIRED' } });
@@ -70,10 +80,12 @@ async function syncConnection(connection, { paymentId, windowStart, reason = 'MA
     const nameMatch = expectedName && candidates.find(txn => { const payer = normalizeName(txn.payerName); return payer.includes(expectedName) || expectedName.includes(payer); });
     const match = nameMatch || candidates.sort((a, b) => a.paymentTimestamp - b.paymentTimestamp)[0];
     try {
+      const paidAt = new Date(Number(match.paymentTimestamp));
+      const platformFeeAmount = payment.business.isPlatform ? null : await computePlatformFee(payment.businessId, paidAt);
       await prisma.payment.update({ where: { id: payment.id }, data: {
         status: 'SUCCESS', providerTransactionId: String(match.id), bankReferenceNo: match.bankReferenceNo,
         internalUtr: match.internalUtr, payerName: match.payerName, payerHandle: match.payerHandle,
-        paidAt: new Date(Number(match.paymentTimestamp)), lastCheckedAt: now,
+        paidAt, lastCheckedAt: now, platformFeeAmount,
       }});
       logger.info('Payment matched and confirmed', { event: 'PAYMENT_MATCHED', reason, businessId: payment.businessId, paymentId: payment.publicId, orderId: payment.clientOrderId, providerTransactionId: String(match.id), amount: Number(match.amount), bankReferenceNo: match.bankReferenceNo, payerName: match.payerName, payerHandle: match.payerHandle });
       claimed.add(String(match.id));

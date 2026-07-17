@@ -33,15 +33,16 @@ router.post('/register', asyncHandler(async (req, res) => {
   if (exists) return res.status(409).json({ success: false, message: 'Email is already registered' });
   const verificationToken = crypto.randomBytes(32).toString('base64url');
   const verificationHash = hashToken(verificationToken);
+  const passwordHash = await bcrypt.hash(input.password, 12);
   const user = await prisma.$transaction(async tx => {
     const business = await tx.business.create({ data: { name: input.businessName, supportEmail: input.email.toLowerCase() } });
     return tx.user.create({ data: {
       name: input.name, email: input.email.toLowerCase(), mobile: input.mobile,
-      passwordHash: await bcrypt.hash(input.password, 12), businessId: business.id,
+      passwordHash, businessId: business.id,
       emailVerificationTokenHash: verificationHash,
       emailVerificationExpiresAt: new Date(Date.now() + config.emailVerificationHours * 3600000),
     }, include: { business: true } });
-  });
+  }, { timeout: 15000 });
   const activationUrl = buildFrontendUrl(req, '/activate', verificationToken);
   const delivery = await safeDeliver(sendActivationEmail({ email: user.email, name: user.name, activationUrl }), activationUrl);
   logger.info('User registered; activation required', { event: 'USER_REGISTERED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), emailDelivered: delivery.delivered });

@@ -31,6 +31,13 @@ enum PaymentSource {
   API
   DASHBOARD
   DEFAULT_LINK
+  SUBSCRIPTION
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  EXPIRED
 }
 
 model User {
@@ -66,13 +73,47 @@ model Business {
   webhookUrl        String?
   webhookSecret     String?
   theme             String                @default("midnight")
+  checkoutLayout    String                @default("both")
+  isPlatform        Boolean               @default(false)
+  planId            String?
+  plan              Plan?                 @relation(fields: [planId], references: [id])
+  suspendedAt       DateTime?
+  suspendedById     String?
+  suspensionReason  String?
   users             User[]
   apiClients        ApiClient[]
   connections       MerchantConnection[]
   payments          Payment[]
   providerTxns      ProviderTransaction[]
+  invoices          SubscriptionInvoice[]
+  defaultLink       DefaultLink?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
+}
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  tokenVersion Int       @default(1)
+  active       Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Plan {
+  id                  String     @id @default(cuid())
+  name                String     @unique
+  price               Decimal    @db.Decimal(10, 2)
+  monthlyPaymentLimit Int?
+  features            Json       @default("[]")
+  isActive            Boolean    @default(true)
+  sortOrder           Int        @default(0)
+  businesses          Business[]
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
 }
 
 model ApiClient {
@@ -157,12 +198,44 @@ model Payment {
   paidAt                DateTime?
   expiresAt             DateTime
   lastCheckedAt         DateTime?
+  platformFeeAmount     Decimal?           @db.Decimal(6, 2)
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
   @@unique([businessId, clientOrderId])
   @@index([businessId, status, createdAt])
   @@index([connectionId, status, expiresAt])
+}
+
+model SubscriptionInvoice {
+  id             String        @id @default(cuid())
+  businessId     String
+  business       Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  periodStart    DateTime
+  periodEnd      DateTime
+  paymentCount   Int
+  totalFeeAmount Decimal       @db.Decimal(10, 2)
+  status         InvoiceStatus @default(PENDING)
+  paymentId      String?       @unique
+  paidAt         DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([businessId, periodStart])
+  @@index([businessId, status])
+}
+
+model DefaultLink {
+  id         String   @id @default(cuid())
+  businessId String   @unique
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  slug       String   @unique
+  label      String?
+  minAmount  Decimal? @db.Decimal(10, 2)
+  maxAmount  Decimal? @db.Decimal(10, 2)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 model ProviderTransaction {

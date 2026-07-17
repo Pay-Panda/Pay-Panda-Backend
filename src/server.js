@@ -12,10 +12,19 @@ const app = express();
 app.disable('x-powered-by');
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 // FRONTEND_URL supports a single origin, a comma-separated list (multiple deployed
-// frontends), or "*" to allow every origin. "*" can't be combined with credentials
-// per the CORS spec, so credentials are only enabled when specific origins are set.
-const allowedOrigins = config.frontendUrl === '*' ? '*' : config.frontendUrl.split(',').map(value => value.trim()).filter(Boolean);
-app.use(cors({ origin: allowedOrigins, credentials: allowedOrigins !== '*' }));
+// frontends), or "*" to allow every origin. Browsers reject comma-separated
+// Access-Control-Allow-Origin values, so always echo exactly one allowed origin.
+const allowedOrigins = parseCorsOrigins(config.frontendUrl);
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins === '*' || allowedOrigins.has(origin)) return callback(null, origin);
+    return callback(Object.assign(new Error(`CORS blocked origin: ${origin}`), { statusCode: 403 }));
+  },
+  credentials: allowedOrigins !== '*',
+};
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use((req, res, next) => { req.id = crypto.randomUUID(); res.set('X-Request-Id', req.id); next(); });
@@ -43,6 +52,8 @@ app.use('/api/connections', require('./routes/connections'));
 app.use('/api', require('./routes/payments'));
 app.use('/api/public', require('./routes/public'));
 app.use('/api/dashboard', require('./routes/dashboard'));
+app.use('/api/admin/auth', require('./routes/admin/auth'));
+app.use('/api/admin', require('./routes/admin/index'));
 
 app.use((req, res) => res.status(404).json({ success: false, message: 'Route not found' }));
 app.use((error, req, res, next) => {
@@ -75,6 +86,16 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 module.exports = app;
+
+function parseCorsOrigins(value) {
+  const origins = new Set();
+  for (const item of String(value || '').split(',')) {
+    const origin = item.trim().replace(/\/+$/, '');
+    if (origin === '*') return '*';
+    if (origin) origins.add(origin);
+  }
+  return origins;
+}
 
 function sanitizeLogPath(value) {
   return value.replace(/(\/api\/auth\/activation\/)[^?]+/i, '$1[redacted]').replace(/([?&](?:token|app_secret)=)[^&]+/gi, '$1[redacted]');
