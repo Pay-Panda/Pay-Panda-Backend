@@ -91,7 +91,14 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   const { email } = z.object({ email: z.email() }).parse(req.body);
   const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
   const generic = { success: true, message: 'If an activated account exists for this email, a password reset link has been sent.' };
-  if (!user?.emailVerifiedAt) return res.json(generic);
+  if (!user) {
+    logger.warn('Password reset skipped; account not found', { event: 'PASSWORD_RESET_SKIPPED', requestId: req.id, reason: 'ACCOUNT_NOT_FOUND', email: maskEmail(email), ip: req.ip });
+    return res.json(generic);
+  }
+  if (!user.emailVerifiedAt) {
+    logger.warn('Password reset skipped; account is not activated', { event: 'PASSWORD_RESET_SKIPPED', requestId: req.id, reason: 'ACCOUNT_NOT_ACTIVATED', userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ip: req.ip });
+    return res.json(generic);
+  }
   const token = crypto.randomBytes(32).toString('base64url');
   await prisma.user.update({ where: { id: user.id }, data: {
     passwordResetTokenHash: hashToken(token),
