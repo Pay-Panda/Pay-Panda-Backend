@@ -47,14 +47,19 @@ function extractUpiId(intent) {
   return upiId;
 }
 
-function createPaymentIntent(baseIntent, { amount, customerName, reason, clientOrderId }) {
+function createPaymentIntent(baseIntent, { amount, reason, remark1, remark2, clientOrderId }) {
   const query = baseIntent.includes('?') ? baseIntent.slice(baseIntent.indexOf('?') + 1) : '';
   const params = new URLSearchParams(query);
+  const note = [remark1, remark2, reason].map(cleanNotePart).filter(Boolean).join(' - ') || `Payment ${clientOrderId}`;
   params.set('am', Number(amount).toFixed(2));
   params.set('cu', 'INR');
-  params.set('tn', reason || `Payment ${clientOrderId}`);
-  if (customerName) params.set('tr', clientOrderId);
+  params.set('tn', note.slice(0, 120));
+  params.set('tr', clientOrderId);
   return `upi://pay?${params.toString()}`;
+}
+
+function cleanNotePart(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
 async function getTransactions(token, { merchantId, startMs, endMs, pageSize = 50 }) {

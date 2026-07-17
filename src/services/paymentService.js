@@ -28,8 +28,9 @@ async function createPayment(businessId, input, source = 'API') {
 
   const upiIntent = bharatpe.createPaymentIntent(connection.baseUpiIntent, {
     amount: input.amount,
-    customerName: input.customerName,
     reason: input.reason,
+    remark1: input.remark1,
+    remark2: input.remark2,
     clientOrderId: input.orderId,
   });
   const qrImage = await QRCode.toBuffer(upiIntent, { type: 'png', width: 480, margin: 2, errorCorrectionLevel: 'M' });
