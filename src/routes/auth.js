@@ -185,9 +185,8 @@ router.post('/login', asyncHandler(async (req, res) => {
     loginOtpChallengeHash: hashToken(challenge), loginOtpHash: hashToken(otp),
     loginOtpExpiresAt: new Date(Date.now() + config.loginOtpMinutes * 60000), loginOtpAttempts: 0,
   }});
-  const otpCopyToken = jwt.sign({ otp, purpose: 'copy-otp' }, config.jwtSecret, { expiresIn: '2m' });
   let delivery;
-  try { delivery = await sendLoginOtpEmail({ email: user.email, name: user.name, otp, copyToken: otpCopyToken }); }
+  try { delivery = await sendLoginOtpEmail({ email: user.email, name: user.name, otp }); }
   catch (error) {
     await prisma.user.update({ where: { id: user.id }, data: { loginOtpChallengeHash: null, loginOtpHash: null, loginOtpExpiresAt: null, loginOtpAttempts: 0 } });
     logger.error('Login OTP email delivery failed; login blocked', { event: 'LOGIN_OTP_DELIVERY_FAILED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ...safeError(error) });
@@ -215,17 +214,6 @@ router.post('/verify-login-otp', asyncHandler(async (req, res) => {
   res.json({ success: true, token: authToken(verified), user: sanitize(verified) });
 }));
 
-router.post('/resolve-otp-copy', asyncHandler(async (req, res) => {
-  const { token } = z.object({ token: z.string().min(10) }).parse(req.body);
-  try {
-    const payload = jwt.verify(token, config.jwtSecret);
-    if (payload.purpose !== 'copy-otp') return res.status(400).json({ success: false, message: 'Invalid token.' });
-    res.json({ success: true, otp: payload.otp });
-  } catch {
-    res.status(400).json({ success: false, message: 'Link expired or invalid. Use the code displayed in the email.' });
-  }
-}));
-
 router.post('/google', asyncHandler(async (req, res) => {
   if (!googleClient) return res.status(503).json({ success: false, message: 'Google Sign-In is not configured yet.' });
   const { credential } = z.object({ credential: z.string().min(20) }).parse(req.body);
@@ -246,8 +234,6 @@ router.post('/google', asyncHandler(async (req, res) => {
   if (!user) {
     const existing = await findUserByEmail(normalizedEmail, { business: true });
     if (existing) {
-      // Google has already verified this person owns the email address, so it's safe to
-      // attach the Google identity to their existing password-based account.
       user = await prisma.user.update({ where: { id: existing.id }, data: {
         googleId: payload.sub, emailVerifiedAt: existing.emailVerifiedAt || new Date(),
       }, include: { business: true } });
@@ -266,7 +252,6 @@ router.post('/google', asyncHandler(async (req, res) => {
   logger.info('Google sign-in completed', { event, requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ip: req.ip });
   res.json({ success: true, token: authToken(user), user: sanitize(user) });
 }));
-
 router.get('/me', requireDashboardAuth, asyncHandler(async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.auth.sub }, include: { business: true } });
   res.json({ success: true, user: sanitize(user) });
