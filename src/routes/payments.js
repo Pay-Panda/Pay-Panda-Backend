@@ -32,6 +32,8 @@ router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res)
     payment_id: z.string().min(10).optional(),
     pay_panda_payment_id: z.string().min(10).optional(),
     order_id: z.string().min(1).max(100).optional(),
+    amount: z.coerce.number().positive().optional(),
+    customer_mobile: z.string().optional(),
   }).refine(value => value.payment_id || value.pay_panda_payment_id || value.order_id, { message: 'Provide payment_id, pay_panda_payment_id or order_id.' }).parse(req.body);
   const paymentId = input.payment_id || input.pay_panda_payment_id;
   let payment = await prisma.payment.findFirst({ where: {
@@ -41,9 +43,27 @@ router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res)
   }, include: { businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, verified: false, message: 'No payment belonging to this OAuth application matches the supplied identifier.' });
   if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
+
+  // Strict amount cross-check: some UPI apps let the payer edit the amount before paying, or a
+  // merchant could look up the wrong order by mistake. When the merchant supplies the amount
+  // they originally requested, require it to match the stored payment to the paisa — never
+  // trust status alone. This runs even on an already-SUCCESS payment, so a mismatched
+  // transaction can never be reported as verified just because *some* payment with that
+  // id/order happened to succeed. Zero tolerance beyond float-rounding to the nearest paisa.
+  const amountMismatch = input.amount !== undefined && Math.round(Number(payment.amount) * 100) !== Math.round(input.amount * 100);
+
+  // Mobile is informational only, not a hard gate: the number entered at checkout is a contact
+  // field, not necessarily the UPI handle's registered number (family member's account, a
+  // different linked number, etc.), so a mismatch alone shouldn't fail an otherwise-good payment.
+  const mobileMatched = !input.customer_mobile || !payment.customerMobile
+    ? null
+    : normalizeMobile(input.customer_mobile) === normalizeMobile(payment.customerMobile);
+
   res.json({
     success: true,
-    verified: payment.status === 'SUCCESS',
+    verified: payment.status === 'SUCCESS' && !amountMismatch,
+    ...(amountMismatch ? { code: 'AMOUNT_MISMATCH', message: 'The paid amount does not match the amount you requested. Do not treat this as verified.' } : {}),
+    ...(mobileMatched !== null ? { mobileMatched } : {}),
     payment: publicPayment(payment),
   });
 }));
@@ -63,6 +83,11 @@ router.get('/v1/payments/id/:paymentId', requireApiAuth, asyncHandler(async (req
   if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
   res.json({ success: true, payment: publicPayment(payment) });
 }));
+
+function normalizeMobile(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
 
 function map(input) {
   return {

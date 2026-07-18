@@ -257,8 +257,25 @@ router.get('/me', requireDashboardAuth, asyncHandler(async (req, res) => {
   res.json({ success: true, user: sanitize(user) });
 }));
 
+router.delete('/account', requireDashboardAuth, asyncHandler(async (req, res) => {
+  const { password, confirm } = z.object({ password: z.string().optional(), confirm: z.literal('DELETE') }).parse(req.body);
+  const user = await prisma.user.findUnique({ where: { id: req.auth.sub } });
+  if (!user) return res.status(404).json({ success: false, message: 'Account not found.' });
+  if (user.passwordHash && !(password && await bcrypt.compare(password, user.passwordHash))) {
+    return res.status(401).json({ success: false, message: 'Incorrect password.' });
+  }
+  const remainingUsers = await prisma.user.count({ where: { businessId: user.businessId, id: { not: user.id } } });
+  if (remainingUsers === 0) {
+    await prisma.business.delete({ where: { id: user.businessId } });
+  } else {
+    await prisma.user.delete({ where: { id: user.id } });
+  }
+  logger.warn('Account permanently deleted', { event: 'ACCOUNT_DELETED', requestId: req.id, userId: user.id, businessId: user.businessId, deletedBusiness: remainingUsers === 0, email: maskEmail(user.email) });
+  res.json({ success: true, message: 'Your account has been permanently deleted.' });
+}));
+
 function sanitize(user) {
-  return { id: user.id, name: user.name, email: user.email, mobile: user.mobile, role: user.role, emailVerifiedAt: user.emailVerifiedAt, business: user.business };
+  return { id: user.id, name: user.name, email: user.email, mobile: user.mobile, role: user.role, emailVerifiedAt: user.emailVerifiedAt, hasPassword: Boolean(user.passwordHash), business: user.business };
 }
 
 const hashToken = token => crypto.createHash('sha256').update(token).digest('hex');
