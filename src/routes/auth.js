@@ -177,8 +177,9 @@ router.post('/login', asyncHandler(async (req, res) => {
     loginOtpChallengeHash: hashToken(challenge), loginOtpHash: hashToken(otp),
     loginOtpExpiresAt: new Date(Date.now() + config.loginOtpMinutes * 60000), loginOtpAttempts: 0,
   }});
+  const otpCopyToken = jwt.sign({ otp, purpose: 'copy-otp' }, config.jwtSecret, { expiresIn: '2m' });
   let delivery;
-  try { delivery = await sendLoginOtpEmail({ email: user.email, name: user.name, otp }); }
+  try { delivery = await sendLoginOtpEmail({ email: user.email, name: user.name, otp, copyToken: otpCopyToken }); }
   catch (error) {
     await prisma.user.update({ where: { id: user.id }, data: { loginOtpChallengeHash: null, loginOtpHash: null, loginOtpExpiresAt: null, loginOtpAttempts: 0 } });
     logger.error('Login OTP email delivery failed; login blocked', { event: 'LOGIN_OTP_DELIVERY_FAILED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ...safeError(error) });
@@ -204,6 +205,17 @@ router.post('/verify-login-otp', asyncHandler(async (req, res) => {
   }, include: { business: true } });
   logger.info('User login completed with email OTP', { event: 'LOGIN_SUCCESS', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ip: req.ip });
   res.json({ success: true, token: authToken(verified), user: sanitize(verified) });
+}));
+
+router.post('/resolve-otp-copy', asyncHandler(async (req, res) => {
+  const { token } = z.object({ token: z.string().min(10) }).parse(req.body);
+  try {
+    const payload = jwt.verify(token, config.jwtSecret);
+    if (payload.purpose !== 'copy-otp') return res.status(400).json({ success: false, message: 'Invalid token.' });
+    res.json({ success: true, otp: payload.otp });
+  } catch {
+    res.status(400).json({ success: false, message: 'Link expired or invalid. Use the code displayed in the email.' });
+  }
 }));
 
 router.get('/me', requireDashboardAuth, asyncHandler(async (req, res) => {
