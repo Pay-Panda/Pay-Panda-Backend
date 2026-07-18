@@ -48,7 +48,7 @@ async function sendLoginOtpEmail({ email, name, otp }) {
     to: email,
     subject: `${otp} is your Pay-Panda login code`,
     text: `Hello ${name}, your Pay-Panda login code is ${otp}. It expires in ${config.loginOtpMinutes} minutes.`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:32px;color:#111827"><h1 style="font-size:24px">Confirm your login</h1><p>Hello ${escapeHtml(name)},</p><p>Enter this one-time code to access Pay-Panda:</p><div style="font-size:34px;font-weight:800;letter-spacing:10px;padding:18px;background:#f3f0ff;border-radius:12px;text-align:center">${otp}</div><p style="color:#6b7280;font-size:13px">The code expires in ${config.loginOtpMinutes} minutes and can be attempted five times.</p></div>`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:32px;color:#111827"><h1 style="font-size:24px">Confirm your login</h1><p>Hello ${escapeHtml(name)},</p><p>Enter this one-time code to access Pay-Panda:</p><div style="font-size:34px;font-weight:800;letter-spacing:10px;padding:18px;background:#f3f0ff;border-radius:12px;text-align:center;user-select:all;-webkit-user-select:all">${otp}</div><p style="text-align:center"><button onclick="navigator.clipboard.writeText('${otp}').then(()=>{this.textContent='Copied!'}).catch(()=>{})" style="display:inline-block;background:#6d4aff;color:white;padding:10px 18px;border:0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Copy code</button></p><p style="color:#6b7280;font-size:13px">The code expires in ${config.loginOtpMinutes} minutes and can be attempted five times.</p></div>`,
   });
   return { delivered: true, messageId: info.messageId };
 }
