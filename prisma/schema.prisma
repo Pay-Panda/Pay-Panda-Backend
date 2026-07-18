@@ -45,7 +45,8 @@ model User {
   name                       String
   email                      String    @unique
   mobile                     String?
-  passwordHash               String
+  passwordHash               String?
+  googleId                   String?   @unique
   emailVerifiedAt            DateTime?
   emailVerificationTokenHash String?
   emailVerificationExpiresAt DateTime?

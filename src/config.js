@@ -32,6 +32,7 @@ module.exports = {
   emailVerificationHours: Number(process.env.EMAIL_VERIFICATION_HOURS || 24),
   passwordResetMinutes: Number(process.env.PASSWORD_RESET_MINUTES || 30),
   loginOtpMinutes: Number(process.env.LOGIN_OTP_MINUTES || 10),
+  googleClientId: process.env.GOOGLE_CLIENT_ID || '',
   superAdmin: {
     id: 'env-super-admin',
     email: process.env.SUPER_ADMIN_EMAIL?.toLowerCase() || '',

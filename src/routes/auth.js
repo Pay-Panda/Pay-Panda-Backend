@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { OAuth2Client } = require('google-auth-library');
 const { z } = require('zod');
 const prisma = require('../db');
 const config = require('../config');
@@ -14,6 +15,7 @@ const { buildFrontendUrl } = require('../lib/frontendUrl');
 
 const router = express.Router();
 const authToken = user => jwt.sign({ sub: user.id, businessId: user.businessId, kind: 'user', role: user.role, ver: user.tokenVersion }, config.jwtSecret, { expiresIn: config.userAccessTokenTtl });
+const googleClient = config.googleClientId ? new OAuth2Client(config.googleClientId) : null;
 
 // Email delivery can fail transiently (SMTP outage, DNS, etc). For informational emails
 // (activation, password reset) we still let the user proceed, falling back to the same
@@ -131,7 +133,7 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
   const user = await prisma.user.findFirst({ where: { passwordResetTokenHash: hashToken(input.token) } });
   if (!user) return res.status(404).json({ success: false, message: 'Password reset link is invalid or has already been used.' });
   if (user.passwordResetExpiresAt < new Date()) return res.status(410).json({ success: false, message: 'Password reset link has expired. Request a new one.' });
-  if (await bcrypt.compare(input.password, user.passwordHash)) return res.status(400).json({ success: false, message: 'Choose a password different from your current password.' });
+  if (user.passwordHash && await bcrypt.compare(input.password, user.passwordHash)) return res.status(400).json({ success: false, message: 'Choose a password different from your current password.' });
   const activatedDuringReset = !user.emailVerifiedAt;
   await prisma.user.update({ where: { id: user.id }, data: {
     passwordHash: await bcrypt.hash(input.password, 12), passwordResetTokenHash: null,
@@ -150,7 +152,9 @@ router.post('/change-password', requireDashboardAuth, asyncHandler(async (req, r
   if (input.newPassword !== input.confirmPassword) return res.status(400).json({ success: false, message: 'New password and confirmation do not match.' });
   if (!isStrongPassword(input.newPassword)) return res.status(400).json({ success: false, message: passwordMessage });
   const user = await prisma.user.findUnique({ where: { id: req.auth.sub } });
-  if (!user || !await bcrypt.compare(input.currentPassword, user.passwordHash)) return res.status(401).json({ success: false, message: 'Current password is incorrect.' });
+  if (!user) return res.status(401).json({ success: false, message: 'Current password is incorrect.' });
+  if (!user.passwordHash) return res.status(400).json({ success: false, code: 'NO_PASSWORD_SET', message: "This account signed up with Google and has no password yet. Use 'Forgot password' to set one." });
+  if (!await bcrypt.compare(input.currentPassword, user.passwordHash)) return res.status(401).json({ success: false, message: 'Current password is incorrect.' });
   if (await bcrypt.compare(input.newPassword, user.passwordHash)) return res.status(400).json({ success: false, message: 'New password must be different from the current password.' });
   await prisma.user.update({ where: { id: user.id }, data: {
     passwordHash: await bcrypt.hash(input.newPassword, 12), passwordResetTokenHash: null,
@@ -163,6 +167,10 @@ router.post('/change-password', requireDashboardAuth, asyncHandler(async (req, r
 router.post('/login', asyncHandler(async (req, res) => {
   const input = z.object({ email: z.email(), password: z.string().min(1) }).parse(req.body);
   const user = await findUserByEmail(input.email, { business: true });
+  if (user && !user.passwordHash) {
+    logger.warn('Login rejected for Google-only account', { event: 'LOGIN_BLOCKED', requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), reason: 'no_password_set', ip: req.ip });
+    return res.status(401).json({ success: false, code: 'GOOGLE_ONLY_ACCOUNT', message: "This account signed up with Google. Continue with Google, or use 'Forgot password' to set a password." });
+  }
   if (!user || !await bcrypt.compare(input.password, user.passwordHash)) {
     logger.warn('Login rejected', { event: 'LOGIN_FAILED', requestId: req.id, email: maskEmail(input.email), reason: 'invalid_credentials', ip: req.ip });
     return res.status(401).json({ success: false, message: 'Invalid email or password' });
@@ -216,6 +224,47 @@ router.post('/resolve-otp-copy', asyncHandler(async (req, res) => {
   } catch {
     res.status(400).json({ success: false, message: 'Link expired or invalid. Use the code displayed in the email.' });
   }
+}));
+
+router.post('/google', asyncHandler(async (req, res) => {
+  if (!googleClient) return res.status(503).json({ success: false, message: 'Google Sign-In is not configured yet.' });
+  const { credential } = z.object({ credential: z.string().min(20) }).parse(req.body);
+  let payload;
+  try {
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: config.googleClientId });
+    payload = ticket.getPayload();
+  } catch (error) {
+    logger.warn('Google credential verification failed', { event: 'GOOGLE_AUTH_INVALID', requestId: req.id, ip: req.ip, ...safeError(error) });
+    return res.status(401).json({ success: false, message: 'Could not verify your Google account. Please try again.' });
+  }
+  if (!payload?.email || !payload.email_verified) {
+    return res.status(401).json({ success: false, message: 'Your Google account email is not verified.' });
+  }
+  const normalizedEmail = payload.email.toLowerCase();
+  let user = await prisma.user.findUnique({ where: { googleId: payload.sub }, include: { business: true } });
+  let event = 'GOOGLE_LOGIN';
+  if (!user) {
+    const existing = await findUserByEmail(normalizedEmail, { business: true });
+    if (existing) {
+      // Google has already verified this person owns the email address, so it's safe to
+      // attach the Google identity to their existing password-based account.
+      user = await prisma.user.update({ where: { id: existing.id }, data: {
+        googleId: payload.sub, emailVerifiedAt: existing.emailVerifiedAt || new Date(),
+      }, include: { business: true } });
+      event = 'GOOGLE_LINKED';
+    } else {
+      user = await prisma.$transaction(async tx => {
+        const business = await tx.business.create({ data: { name: `${payload.name || 'My'}'s Workspace`, supportEmail: normalizedEmail } });
+        return tx.user.create({ data: {
+          name: payload.name || normalizedEmail.split('@')[0], email: normalizedEmail, googleId: payload.sub,
+          emailVerifiedAt: new Date(), businessId: business.id,
+        }, include: { business: true } });
+      }, { timeout: 15000 });
+      event = 'GOOGLE_SIGNUP';
+    }
+  }
+  logger.info('Google sign-in completed', { event, requestId: req.id, userId: user.id, businessId: user.businessId, email: maskEmail(user.email), ip: req.ip });
+  res.json({ success: true, token: authToken(user), user: sanitize(user) });
 }));
 
 router.get('/me', requireDashboardAuth, asyncHandler(async (req, res) => {
