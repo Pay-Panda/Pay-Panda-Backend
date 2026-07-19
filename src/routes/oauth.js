@@ -18,7 +18,7 @@ router.post('/token', asyncHandler(async (req, res) => {
     logger.warn('OAuth token request rejected', { event: 'OAUTH_TOKEN_REJECTED', requestId: req.id, appId: input.app_id, ip: req.ip });
     return res.status(401).json({ error: 'invalid_client', error_description: 'Invalid App ID or App Secret' });
   }
-  const accessToken = jwt.sign({ sub: client.id, appId: client.appId, businessId: client.businessId, kind: 'client', ver: client.tokenVersion }, config.jwtSecret, { expiresIn: config.accessTokenTtl });
+  const accessToken = jwt.sign({ sub: client.id, appId: client.appId, businessId: client.businessId, businessUnitId: client.businessUnitId || undefined, kind: 'client', ver: client.tokenVersion }, config.jwtSecret, { expiresIn: config.accessTokenTtl });
   await prisma.apiClient.update({ where: { id: client.id }, data: { lastUsedAt: new Date() } });
   logger.info('OAuth access token issued', { event: 'OAUTH_TOKEN_ISSUED', requestId: req.id, businessId: client.businessId, clientId: client.id, appId: client.appId, ip: req.ip });
   res.json({ access_token: accessToken, token_type: 'Bearer', expires_in: ttlSeconds(config.accessTokenTtl) });

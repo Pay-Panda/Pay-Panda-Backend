@@ -104,6 +104,7 @@ model BusinessUnit {
   description String?
   active      Boolean   @default(true)
   payments    Payment[]
+  apiClients  ApiClient[]
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -137,17 +138,21 @@ model Plan {
 }
 
 model ApiClient {
-  id           String    @id @default(cuid())
-  businessId   String
-  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  name         String
-  appId        String    @unique
-  secretHash   String
-  active       Boolean   @default(true)
-  tokenVersion Int       @default(1)
-  lastUsedAt   DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id             String        @id @default(cuid())
+  businessId     String
+  business       Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  businessUnitId String?
+  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id], onDelete: Cascade)
+  name           String
+  appId          String        @unique
+  secretHash     String
+  active         Boolean       @default(true)
+  tokenVersion   Int           @default(1)
+  lastUsedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([businessUnitId])
 }
 
 model MerchantConnection {

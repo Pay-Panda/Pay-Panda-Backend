@@ -13,21 +13,31 @@ router.use(requireDashboardAuth);
 router.get('/', asyncHandler(async (req, res) => {
   const clients = await prisma.apiClient.findMany({ where: { businessId: req.auth.businessId }, select: {
     id: true, name: true, appId: true, active: true, lastUsedAt: true, createdAt: true,
+    businessUnit: { select: { id: true, name: true, code: true } },
   }});
   res.json({ success: true, clients });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const { name } = z.object({ name: z.string().min(2).max(80) }).parse(req.body);
+  const { name, businessUnitId } = z.object({ name: z.string().min(2).max(80), businessUnitId: z.string().min(1).optional() }).parse(req.body);
   const activeCount = await prisma.apiClient.count({ where: { businessId: req.auth.businessId, active: true } });
   if (activeCount >= 5) return res.status(409).json({ success: false, code: 'CLIENT_LIMIT_REACHED', message: 'A workspace can have a maximum of 5 active app credentials. Revoke an unused credential first.' });
+  let businessUnit = null;
+  if (businessUnitId) {
+    businessUnit = await prisma.businessUnit.findFirst({ where: { id: businessUnitId, businessId: req.auth.businessId, active: true } });
+    if (!businessUnit) return res.status(404).json({ success: false, message: 'Selected sub-business is not active or does not exist' });
+  }
   const appId = randomId('app', 15);
   const appSecret = randomId('secret', 30);
   const client = await prisma.apiClient.create({ data: {
-    businessId: req.auth.businessId, name, appId, secretHash: await bcrypt.hash(appSecret, 12),
+    businessId: req.auth.businessId, businessUnitId: businessUnit?.id, name, appId, secretHash: await bcrypt.hash(appSecret, 12),
   }});
-  logger.info('OAuth application created', { event: 'OAUTH_CLIENT_CREATED', requestId: req.id, businessId: req.auth.businessId, clientId: client.id, appId: client.appId, name: client.name });
-  res.status(201).json({ success: true, client: { id: client.id, name, appId, appSecret, createdAt: client.createdAt }, message: 'Copy the App Secret now. It will not be shown again.' });
+  logger.info('OAuth application created', { event: 'OAUTH_CLIENT_CREATED', requestId: req.id, businessId: req.auth.businessId, businessUnitId: businessUnit?.id, clientId: client.id, appId: client.appId, name: client.name });
+  res.status(201).json({
+    success: true,
+    client: { id: client.id, name, appId, appSecret, createdAt: client.createdAt, businessUnit: businessUnit ? { id: businessUnit.id, name: businessUnit.name, code: businessUnit.code } : null },
+    message: 'Copy the App Secret now. It will not be shown again.',
+  });
 }));
 
 router.post('/:id/rotate', asyncHandler(async (req, res) => {

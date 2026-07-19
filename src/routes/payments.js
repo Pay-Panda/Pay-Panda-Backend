@@ -17,6 +17,16 @@ const schema = z.object({
 
 router.post('/v1/payments', requireApiAuth, asyncHandler(async (req, res) => {
   const input = schema.parse(req.body);
+  // An app credential created for a specific sub-business is locked to it: every payment it
+  // creates is forced onto that sub-business regardless of what the request claims, and it
+  // cannot redirect payments to a different sub-business by passing its own id/code.
+  if (req.auth.businessUnitId) {
+    if ((input.business_unit_id && input.business_unit_id !== req.auth.businessUnitId) || input.business_unit_code) {
+      return res.status(400).json({ success: false, message: 'This app credential is restricted to a specific sub-business and cannot create payments for a different one.' });
+    }
+    input.business_unit_id = req.auth.businessUnitId;
+    input.business_unit_code = undefined;
+  }
   const { payment, created } = await createPayment(req.auth.businessId, map(input), 'API');
   res.status(created ? 201 : 200).json({ success: true, payment: publicPayment(payment) });
 }));
@@ -38,6 +48,7 @@ router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res)
   const paymentId = input.payment_id || input.pay_panda_payment_id;
   let payment = await prisma.payment.findFirst({ where: {
     businessId: req.auth.businessId,
+    ...scopeWhere(req),
     ...(paymentId ? { publicId: paymentId } : {}),
     ...(input.order_id ? { clientOrderId: input.order_id } : {}),
   }, include: { businessUnit: true, connection: true } });
@@ -69,8 +80,8 @@ router.post('/v1/payments/verify', requireApiAuth, asyncHandler(async (req, res)
 }));
 
 router.get('/v1/payments/:orderId', requireApiAuth, asyncHandler(async (req, res) => {
-  let payment = await prisma.payment.findUnique({ where: {
-    businessId_clientOrderId: { businessId: req.auth.businessId, clientOrderId: req.params.orderId },
+  let payment = await prisma.payment.findFirst({ where: {
+    businessId: req.auth.businessId, clientOrderId: req.params.orderId, ...scopeWhere(req),
   }, include: { businessUnit: true, connection: true }});
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
   if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
@@ -78,11 +89,17 @@ router.get('/v1/payments/:orderId', requireApiAuth, asyncHandler(async (req, res
 }));
 
 router.get('/v1/payments/id/:paymentId', requireApiAuth, asyncHandler(async (req, res) => {
-  let payment = await prisma.payment.findFirst({ where: { publicId: req.params.paymentId, businessId: req.auth.businessId }, include: { businessUnit: true, connection: true } });
+  let payment = await prisma.payment.findFirst({ where: { publicId: req.params.paymentId, businessId: req.auth.businessId, ...scopeWhere(req) }, include: { businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
   if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { businessUnit: true, connection: true } });
   res.json({ success: true, payment: publicPayment(payment) });
 }));
+
+// A credential scoped to a sub-business can only ever see payments belonging to it — applied
+// to every read/verify lookup so a restricted app can't probe payments outside its own scope.
+function scopeWhere(req) {
+  return req.auth.businessUnitId ? { businessUnitId: req.auth.businessUnitId } : {};
+}
 
 function normalizeMobile(value) {
   const digits = String(value || '').replace(/\D/g, '');
