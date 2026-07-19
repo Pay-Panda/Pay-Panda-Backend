@@ -40,6 +40,29 @@ enum InvoiceStatus {
   EXPIRED
 }
 
+enum RefundStatus {
+  NONE
+  REQUESTED
+  REFUNDED
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum ComplaintFilerType {
+  CUSTOMER
+  BUSINESS
+}
+
+enum ComplaintStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+}
+
 model User {
   id                         String    @id @default(cuid())
   name                       String
@@ -91,6 +114,8 @@ model Business {
   providerTxns      ProviderTransaction[]
   invoices          SubscriptionInvoice[]
   defaultLink       DefaultLink?
+  complaints        PaymentComplaint[]
+  webhookDeliveries WebhookDelivery[]
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 }
@@ -227,6 +252,13 @@ model Payment {
   expiresAt             DateTime
   lastCheckedAt         DateTime?
   platformFeeAmount     Decimal?           @db.Decimal(6, 2)
+  refundStatus          RefundStatus       @default(NONE)
+  refundReason          String?
+  refundReference       String?
+  refundRequestedAt     DateTime?
+  refundedAt            DateTime?
+  complaints            PaymentComplaint[]
+  webhookDeliveries     WebhookDelivery[]
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
@@ -234,6 +266,47 @@ model Payment {
   @@index([businessId, status, createdAt])
   @@index([businessUnitId, status, createdAt])
   @@index([connectionId, status, expiresAt])
+}
+
+model WebhookDelivery {
+  id             String                @id @default(cuid())
+  businessId     String
+  business       Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  paymentId      String
+  payment        Payment               @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  event          String
+  url            String
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  lastAttemptAt  DateTime?
+  nextAttemptAt  DateTime?
+  responseStatus Int?
+  responseBody   String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  @@index([businessId, createdAt])
+  @@index([status, nextAttemptAt])
+}
+
+model PaymentComplaint {
+  id           String             @id @default(cuid())
+  paymentId    String
+  payment      Payment            @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  businessId   String
+  business     Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  filedBy      ComplaintFilerType
+  filerName    String?
+  filerContact String?
+  message      String
+  status       ComplaintStatus    @default(OPEN)
+  adminNotes   String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([businessId, status, createdAt])
+  @@index([paymentId])
 }
 
 model SubscriptionInvoice {

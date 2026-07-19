@@ -6,6 +6,7 @@ const config = require('../config');
 const asyncHandler = require('../lib/asyncHandler');
 const { createPayment, publicPayment } = require('../services/paymentService');
 const { syncPublicPayment } = require('../services/poller');
+const { queueWebhook } = require('../services/webhookService');
 
 const router = express.Router();
 
@@ -23,6 +24,7 @@ router.get('/payments/:publicId', asyncHandler(async (req, res) => {
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
   if (payment.status === 'PENDING' && payment.expiresAt <= new Date()) {
     payment = await prisma.payment.update({ where: { id: payment.id }, data: { status: 'EXPIRED' }, include: { business: true, businessUnit: true, connection: true } });
+    queueWebhook(payment.business, payment, 'payment.expired');
   }
   if (payment.status === 'PENDING') {
     await syncPublicPayment(payment.publicId);
@@ -74,6 +76,22 @@ router.post('/link/:slug/pay', asyncHandler(async (req, res) => {
     reason: link.label || 'Payment',
   }, 'DEFAULT_LINK');
   res.status(201).json({ success: true, payment: publicPayment(payment) });
+}));
+
+// A customer can report a problem with their own payment without ever logging in — they
+// only need the payment ID from their receipt/checkout page.
+router.post('/payments/:publicId/complaints', asyncHandler(async (req, res) => {
+  const { message, filerName, filerContact } = z.object({
+    message: z.string().min(5).max(1000),
+    filerName: z.string().max(120).optional(),
+    filerContact: z.string().max(200).optional(),
+  }).parse(req.body);
+  const payment = await prisma.payment.findUnique({ where: { publicId: req.params.publicId } });
+  if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
+  const complaint = await prisma.paymentComplaint.create({
+    data: { paymentId: payment.id, businessId: payment.businessId, filedBy: 'CUSTOMER', filerName, filerContact, message },
+  });
+  res.status(201).json({ success: true, complaint: { id: complaint.id, status: complaint.status, createdAt: complaint.createdAt } });
 }));
 
 module.exports = router;

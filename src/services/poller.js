@@ -4,6 +4,7 @@ const { decrypt } = require('../lib/crypto');
 const bharatpe = require('../providers/bharatpe');
 const { computePlatformFee } = require('./subscriptionService');
 const { sendPaymentReceiptEmail, sendPaymentReceivedEmail } = require('./emailService');
+const { queueWebhook } = require('./webhookService');
 const { logger, safeError } = require('../lib/logger');
 
 // Payment notification emails are best-effort side effects — never let a delivery failure
@@ -29,8 +30,17 @@ let reconciliationRunning = false;
 const normalizeName = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 async function expirePendingPayments() {
-  const expired = await prisma.payment.updateMany({ where: { status: 'PENDING', expiresAt: { lte: new Date() } }, data: { status: 'EXPIRED' } });
-  if (expired.count) logger.warn('Expired stale payment sessions', { event: 'PAYMENTS_EXPIRED', count: expired.count });
+  const staleIds = (await prisma.payment.findMany({
+    where: { status: 'PENDING', expiresAt: { lte: new Date() } }, select: { id: true },
+  })).map(item => item.id);
+  if (!staleIds.length) return 0;
+
+  const expired = await prisma.payment.updateMany({ where: { id: { in: staleIds } }, data: { status: 'EXPIRED' } });
+  logger.warn('Expired stale payment sessions', { event: 'PAYMENTS_EXPIRED', count: expired.count });
+
+  const expiredPayments = await prisma.payment.findMany({ where: { id: { in: staleIds } }, include: { business: true } });
+  for (const payment of expiredPayments) queueWebhook(payment.business, payment, 'payment.expired');
+
   return expired.count;
 }
 
@@ -83,12 +93,9 @@ async function syncConnection(connection, { paymentId, windowStart, reason = 'MA
     where: { providerTransactionId: { in: txns.map(txn => String(txn.id)) } }, select: { providerTransactionId: true },
   })).map(item => item.providerTransactionId));
 
-  for (const payment of pending) {
-    const candidates = txns.filter(txn => !claimed.has(String(txn.id)) && txn.type === 'PAYMENT_RECV' && txn.status === 'SUCCESS' && Number(txn.paymentTimestamp) >= payment.createdAt.getTime() && Number(txn.paymentTimestamp) <= payment.expiresAt.getTime() && Math.abs(Number(txn.amount) - Number(payment.amount)) < 0.001);
-    if (!candidates.length) continue;
-    const expectedName = normalizeName(payment.customerName);
-    const nameMatch = expectedName && candidates.find(txn => { const payer = normalizeName(txn.payerName); return payer.includes(expectedName) || expectedName.includes(payer); });
-    const match = nameMatch || candidates.sort((a, b) => a.paymentTimestamp - b.paymentTimestamp)[0];
+  const candidatesFor = payment => txns.filter(txn => !claimed.has(String(txn.id)) && txn.type === 'PAYMENT_RECV' && txn.status === 'SUCCESS' && Number(txn.paymentTimestamp) >= payment.createdAt.getTime() && Number(txn.paymentTimestamp) <= payment.expiresAt.getTime() && Math.abs(Number(txn.amount) - Number(payment.amount)) < 0.001);
+
+  const confirmMatch = async (payment, match) => {
     try {
       const paidAt = new Date(Number(match.paymentTimestamp));
       const platformFeeAmount = await computePlatformFee(payment.businessId, paidAt);
@@ -99,9 +106,31 @@ async function syncConnection(connection, { paymentId, windowStart, reason = 'MA
       }});
       logger.info('Payment matched and confirmed', { event: 'PAYMENT_MATCHED', reason, businessId: payment.businessId, paymentId: payment.publicId, orderId: payment.clientOrderId, providerTransactionId: String(match.id), amount: Number(match.amount), bankReferenceNo: match.bankReferenceNo, payerName: match.payerName, payerHandle: match.payerHandle });
       notifyPaymentConfirmed(confirmed, payment.business);
+      queueWebhook(payment.business, confirmed, 'payment.success');
       claimed.add(String(match.id));
     } catch (error) { if (error.code !== 'P2002') throw error; }
+  };
+
+  // Two passes so a confident name match always wins over creation-order luck: without
+  // this, two pending payments for the same amount could see the earlier-created one
+  // greedily grab a transaction that actually names the *other* payer, before that other
+  // payment ever gets a chance to claim it by name.
+  const unresolved = [];
+  for (const payment of pending) {
+    const candidates = candidatesFor(payment);
+    if (!candidates.length) { unresolved.push(payment); continue; }
+    const expectedName = normalizeName(payment.customerName);
+    const nameMatch = expectedName && candidates.find(txn => { const payer = normalizeName(txn.payerName); return payer.includes(expectedName) || expectedName.includes(payer); });
+    if (nameMatch) await confirmMatch(payment, nameMatch);
+    else unresolved.push(payment);
   }
+  for (const payment of unresolved) {
+    const candidates = candidatesFor(payment);
+    if (!candidates.length) continue;
+    const match = candidates.sort((a, b) => a.paymentTimestamp - b.paymentTimestamp)[0];
+    await confirmMatch(payment, match);
+  }
+
   await prisma.payment.updateMany({ where: { id: { in: pending.map(item => item.id) }, status: 'PENDING' }, data: { lastCheckedAt: now } });
 }
 

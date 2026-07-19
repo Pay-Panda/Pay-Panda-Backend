@@ -9,7 +9,9 @@ const { expirePendingPayments } = require('../services/poller');
 const { TIERS } = require('../lib/feeTiers');
 const { parseDateRange } = require('../lib/dateRange');
 const subscriptionService = require('../services/subscriptionService');
-const { logger } = require('../lib/logger');
+const { generateWebhookSecret, sendTestWebhook } = require('../services/webhookService');
+const { sendSecurityAlertEmail } = require('../services/emailService');
+const { logger, safeError } = require('../lib/logger');
 
 const router = express.Router();
 router.use(requireDashboardAuth);
@@ -63,6 +65,59 @@ router.patch('/settings', asyncHandler(async (req, res) => {
   const { paymentExpiryMins } = z.object({ paymentExpiryMins: z.coerce.number().int().min(1).max(60) }).parse(req.body);
   const business = await prisma.business.update({ where: { id: req.auth.businessId }, data: { paymentExpiryMins } });
   res.json({ success: true, business });
+}));
+
+// ---- Webhooks ------------------------------------------------------------
+
+function notifyWebhookSecurityAlert(businessId, action, detail) {
+  prisma.business.findUnique({ where: { id: businessId }, select: { name: true, supportEmail: true } })
+    .then(business => {
+      if (!business?.supportEmail) return;
+      return sendSecurityAlertEmail({ email: business.supportEmail, businessName: business.name, action, detail });
+    })
+    .catch(error => logger.error('Security alert email failed', { event: 'SECURITY_ALERT_EMAIL_FAILED', businessId, action, ...safeError(error) }));
+}
+
+router.get('/webhook', asyncHandler(async (req, res) => {
+  const business = await prisma.business.findUnique({ where: { id: req.auth.businessId }, select: { webhookUrl: true, webhookSecret: true } });
+  res.json({ success: true, webhook: { url: business.webhookUrl, secretConfigured: Boolean(business.webhookSecret), secret: business.webhookSecret } });
+}));
+
+router.patch('/webhook', asyncHandler(async (req, res) => {
+  const { url } = z.object({ url: z.string().url().max(500).nullable() }).parse(req.body);
+  const existing = await prisma.business.findUnique({ where: { id: req.auth.businessId }, select: { webhookSecret: true } });
+  const data = { webhookUrl: url };
+  if (url && !existing.webhookSecret) data.webhookSecret = generateWebhookSecret();
+  if (!url) { data.webhookSecret = null; }
+  const business = await prisma.business.update({ where: { id: req.auth.businessId }, data });
+  logger.info('Webhook URL updated', { event: 'WEBHOOK_URL_UPDATED', requestId: req.id, businessId: req.auth.businessId, url });
+  notifyWebhookSecurityAlert(req.auth.businessId, 'Webhook URL updated', url ? `New webhook URL: ${url}` : 'Webhook disabled');
+  res.json({ success: true, webhook: { url: business.webhookUrl, secretConfigured: Boolean(business.webhookSecret), secret: business.webhookSecret } });
+}));
+
+router.post('/webhook/regenerate-secret', asyncHandler(async (req, res) => {
+  const secret = generateWebhookSecret();
+  const business = await prisma.business.update({ where: { id: req.auth.businessId }, data: { webhookSecret: secret } });
+  logger.warn('Webhook secret regenerated', { event: 'WEBHOOK_SECRET_REGENERATED', requestId: req.id, businessId: req.auth.businessId });
+  notifyWebhookSecurityAlert(req.auth.businessId, 'Webhook secret regenerated', 'Your webhook signing secret was regenerated. Update your endpoint if it verifies signatures.');
+  res.json({ success: true, webhook: { url: business.webhookUrl, secretConfigured: true, secret: business.webhookSecret } });
+}));
+
+router.post('/webhook/test', asyncHandler(async (req, res) => {
+  const business = await prisma.business.findUnique({ where: { id: req.auth.businessId } });
+  const result = await sendTestWebhook(business);
+  res.json({ success: true, result });
+}));
+
+router.get('/webhook/deliveries', asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+  const where = { businessId: req.auth.businessId };
+  const [items, total] = await Promise.all([
+    prisma.webhookDelivery.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit }),
+    prisma.webhookDelivery.count({ where }),
+  ]);
+  res.json({ success: true, deliveries: items, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 }));
 
 // ---- Business units / sub-businesses -----------------------------------
@@ -259,6 +314,61 @@ router.patch('/default-link', asyncHandler(async (req, res) => {
   const input = linkInput.parse(req.body);
   const link = await prisma.defaultLink.update({ where: { businessId: req.auth.businessId }, data: input });
   res.json({ success: true, link: { ...link, url: `${config.publicAppUrl}/pay/link/${link.slug}` } });
+}));
+
+// ---- Refunds --------------------------------------------------------------
+// Pay-Panda never holds customer money (UPI passthrough directly into the business's own
+// bank account), so it has no technical ability to pull money back automatically. These
+// endpoints are a status/audit trail only: the business marks a SUCCESS payment as
+// "refund requested" and later "refunded" once they've sent the money back themselves via
+// their own UPI app, recording the UTR/reference they used.
+
+router.post('/payments/:id/refund-request', asyncHandler(async (req, res) => {
+  const { reason } = z.object({ reason: z.string().min(3).max(500) }).parse(req.body);
+  const payment = await prisma.payment.findFirst({ where: { id: req.params.id, businessId: req.auth.businessId } });
+  if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
+  if (payment.status !== 'SUCCESS') return res.status(400).json({ success: false, message: 'Only successful payments can be marked for refund.' });
+  if (payment.refundStatus !== 'NONE') return res.status(409).json({ success: false, message: 'A refund has already been requested for this payment.' });
+  const updated = await prisma.payment.update({ where: { id: payment.id }, data: { refundStatus: 'REQUESTED', refundReason: reason, refundRequestedAt: new Date() } });
+  logger.info('Refund requested', { event: 'REFUND_REQUESTED', requestId: req.id, businessId: req.auth.businessId, paymentId: payment.publicId });
+  res.json({ success: true, payment: updated });
+}));
+
+router.post('/payments/:id/refund-complete', asyncHandler(async (req, res) => {
+  const { reference } = z.object({ reference: z.string().min(3).max(120) }).parse(req.body);
+  const payment = await prisma.payment.findFirst({ where: { id: req.params.id, businessId: req.auth.businessId } });
+  if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
+  if (payment.refundStatus !== 'REQUESTED') return res.status(400).json({ success: false, message: 'Refund must be requested before it can be marked complete.' });
+  const updated = await prisma.payment.update({ where: { id: payment.id }, data: { refundStatus: 'REFUNDED', refundReference: reference, refundedAt: new Date() } });
+  logger.info('Refund marked complete', { event: 'REFUND_COMPLETED', requestId: req.id, businessId: req.auth.businessId, paymentId: payment.publicId });
+  res.json({ success: true, payment: updated });
+}));
+
+// ---- Complaints (business side) -------------------------------------------
+
+router.get('/complaints', asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+  const status = req.query.status && ['OPEN', 'INVESTIGATING', 'RESOLVED'].includes(req.query.status) ? req.query.status : undefined;
+  const where = { businessId: req.auth.businessId, ...(status ? { status } : {}) };
+  const [items, total] = await Promise.all([
+    prisma.paymentComplaint.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit, include: { payment: { select: { publicId: true, clientOrderId: true, amount: true, status: true } } } }),
+    prisma.paymentComplaint.count({ where }),
+  ]);
+  res.json({ success: true, complaints: items, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+}));
+
+router.post('/payments/:id/complaints', asyncHandler(async (req, res) => {
+  const { message, filerName, filerContact } = z.object({
+    message: z.string().min(5).max(1000), filerName: z.string().max(120).optional(), filerContact: z.string().max(200).optional(),
+  }).parse(req.body);
+  const payment = await prisma.payment.findFirst({ where: { id: req.params.id, businessId: req.auth.businessId } });
+  if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
+  const complaint = await prisma.paymentComplaint.create({
+    data: { paymentId: payment.id, businessId: req.auth.businessId, filedBy: 'BUSINESS', filerName, filerContact, message },
+  });
+  logger.info('Complaint filed by business', { event: 'COMPLAINT_FILED', requestId: req.id, businessId: req.auth.businessId, paymentId: payment.publicId, complaintId: complaint.id });
+  res.status(201).json({ success: true, complaint });
 }));
 
 module.exports = router;

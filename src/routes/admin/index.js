@@ -331,6 +331,52 @@ router.patch('/plans/:id/archive', asyncHandler(async (req, res) => {
   res.json({ success: true, plan });
 }));
 
+// ---- Complaints ------------------------------------------------------------
+
+router.get('/complaints', asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+  const status = req.query.status && ['OPEN', 'INVESTIGATING', 'RESOLVED'].includes(req.query.status) ? req.query.status : undefined;
+  const businessId = req.query.business_id || undefined;
+  const where = { ...(status ? { status } : {}), ...(businessId ? { businessId } : {}) };
+  const [items, total] = await Promise.all([
+    prisma.paymentComplaint.findMany({
+      where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * limit, take: limit,
+      include: {
+        business: { select: { id: true, name: true } },
+        payment: { select: { publicId: true, clientOrderId: true, amount: true, status: true, customerName: true, customerMobile: true } },
+      },
+    }),
+    prisma.paymentComplaint.count({ where }),
+  ]);
+  res.json({ success: true, complaints: items, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+}));
+
+router.get('/complaints/:id', asyncHandler(async (req, res) => {
+  const complaint = await prisma.paymentComplaint.findUnique({
+    where: { id: req.params.id },
+    include: {
+      business: { select: { id: true, name: true, supportEmail: true } },
+      payment: true,
+    },
+  });
+  if (!complaint) return res.status(404).json({ success: false, message: 'Complaint not found' });
+  res.json({ success: true, complaint });
+}));
+
+router.patch('/complaints/:id', asyncHandler(async (req, res) => {
+  const { status, adminNotes } = z.object({
+    status: z.enum(['OPEN', 'INVESTIGATING', 'RESOLVED']).optional(),
+    adminNotes: z.string().max(2000).optional(),
+  }).parse(req.body);
+  const complaint = await prisma.paymentComplaint.update({
+    where: { id: req.params.id },
+    data: { ...(status ? { status } : {}), ...(adminNotes !== undefined ? { adminNotes } : {}) },
+  });
+  logger.info('Complaint updated by admin', { event: 'ADMIN_COMPLAINT_UPDATED', requestId: req.id, adminId: req.auth.sub, complaintId: complaint.id, status: complaint.status });
+  res.json({ success: true, complaint });
+}));
+
 module.exports = router;
 
 function getCached(key) {
