@@ -9,6 +9,15 @@ const { syncPublicPayment } = require('../services/poller');
 
 const router = express.Router();
 
+router.get('/plans', asyncHandler(async (req, res) => {
+  const plans = await prisma.plan.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+    select: { id: true, name: true, price: true, monthlyPaymentLimit: true, features: true },
+  });
+  res.json({ success: true, plans: plans.map(plan => ({ ...plan, price: Number(plan.price) })) });
+}));
+
 router.get('/payments/:publicId', asyncHandler(async (req, res) => {
   let payment = await prisma.payment.findUnique({ where: { publicId: req.params.publicId }, include: { business: true, businessUnit: true, connection: true } });
   if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
@@ -55,12 +64,13 @@ router.post('/link/:slug/pay', asyncHandler(async (req, res) => {
     amount: z.coerce.number().positive().max(1000000),
     customer_name: z.string().max(100).optional(),
     customer_mobile: z.string().regex(/^\d{6,15}$/, 'Enter a valid mobile number.').optional(),
+    customer_email: z.email().optional(),
   }).parse(req.body);
   if (link.minAmount && input.amount < Number(link.minAmount)) return res.status(400).json({ success: false, message: `Minimum amount is ₹${Number(link.minAmount).toFixed(2)}.` });
   if (link.maxAmount && input.amount > Number(link.maxAmount)) return res.status(400).json({ success: false, message: `Maximum amount is ₹${Number(link.maxAmount).toFixed(2)}.` });
   const orderId = `LINK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const { payment } = await createPayment(link.businessId, {
-    orderId, amount: input.amount, customerName: input.customer_name, customerMobile: input.customer_mobile,
+    orderId, amount: input.amount, customerName: input.customer_name, customerMobile: input.customer_mobile, customerEmail: input.customer_email,
     reason: link.label || 'Payment',
   }, 'DEFAULT_LINK');
   res.status(201).json({ success: true, payment: publicPayment(payment) });

@@ -3,6 +3,7 @@ const { z } = require('zod');
 const prisma = require('../../db');
 const asyncHandler = require('../../lib/asyncHandler');
 const { requireAdminAuth } = require('../../middleware/auth');
+const { parseDateRange } = require('../../lib/dateRange');
 const { logger } = require('../../lib/logger');
 
 const router = express.Router();
@@ -19,18 +20,21 @@ const businessUnitInput = z.object({
 // ---- Insights ----------------------------------------------------------
 
 router.get('/insights/overview', asyncHandler(async (req, res) => {
-  const cached = getCached('overview');
+  const { from, to } = parseDateRange(req.query);
+  const cacheKey = `overview:${from.toISOString()}:${to.toISOString()}`;
+  const cached = getCached(cacheKey);
   if (cached) return res.json(cached);
-  const since30 = new Date(Date.now() - 30 * 86400000);
-  const [businessCount, activeCount, suspendedCount, userCount, paymentTotals, planGroups, recentBusinesses, dailyPayments] = await Promise.all([
+  const [businessCount, activeCount, suspendedCount, userCount, paymentTotals, rangePaymentTotals, planGroups, recentBusinesses, dailyPayments, businessGroups] = await Promise.all([
     prisma.business.count(),
     prisma.business.count({ where: { suspendedAt: null } }),
     prisma.business.count({ where: { suspendedAt: { not: null } } }),
     prisma.user.count(),
     prisma.payment.aggregate({ where: { status: 'SUCCESS' }, _sum: { amount: true }, _count: true }),
+    prisma.payment.aggregate({ where: { status: 'SUCCESS', paidAt: { gte: from, lte: to } }, _sum: { amount: true }, _count: true }),
     prisma.business.groupBy({ by: ['planId'], _count: true }),
     prisma.business.findMany({ orderBy: { createdAt: 'desc' }, take: 5, select: { id: true, name: true, createdAt: true, suspendedAt: true } }),
-    prisma.payment.findMany({ where: { status: 'SUCCESS', createdAt: { gte: since30 } }, select: { amount: true, createdAt: true } }),
+    prisma.payment.findMany({ where: { status: 'SUCCESS', paidAt: { gte: from, lte: to } }, select: { amount: true, paidAt: true } }),
+    prisma.payment.groupBy({ by: ['businessId'], where: { status: 'SUCCESS', paidAt: { gte: from, lte: to } }, _count: true, _sum: { amount: true }, orderBy: { _sum: { amount: 'desc' } }, take: 8 }),
   ]);
 
   const plans = await prisma.plan.findMany({ select: { id: true, name: true } });
@@ -39,12 +43,18 @@ router.get('/insights/overview', asyncHandler(async (req, res) => {
 
   const dayBuckets = {};
   for (const payment of dailyPayments) {
-    const day = payment.createdAt.toISOString().slice(0, 10);
+    const day = payment.paidAt.toISOString().slice(0, 10);
     if (!dayBuckets[day]) dayBuckets[day] = { day, count: 0, amount: 0 };
     dayBuckets[day].count += 1;
     dayBuckets[day].amount += Number(payment.amount);
   }
   const trend = Object.values(dayBuckets).sort((a, b) => a.day.localeCompare(b.day));
+
+  const topBusinessNames = await prisma.business.findMany({ where: { id: { in: businessGroups.map(row => row.businessId) } }, select: { id: true, name: true } });
+  const nameById = Object.fromEntries(topBusinessNames.map(b => [b.id, b.name]));
+  const topBusinesses = businessGroups.map(row => ({
+    id: row.businessId, label: nameById[row.businessId] || 'Unknown', amount: Number(row._sum.amount || 0), count: row._count,
+  }));
 
   const payload = {
     success: true,
@@ -52,12 +62,15 @@ router.get('/insights/overview', asyncHandler(async (req, res) => {
       businesses: { total: businessCount, active: activeCount, suspended: suspendedCount },
       users: userCount,
       lifetimePayments: { count: paymentTotals._count, amount: Number(paymentTotals._sum.amount || 0) },
+      rangePayments: { count: rangePaymentTotals._count, amount: Number(rangePaymentTotals._sum.amount || 0) },
       planDistribution,
       recentBusinesses,
       trend,
+      topBusinesses,
+      range: { from, to },
     },
   };
-  setCached('overview', payload);
+  setCached(cacheKey, payload);
   res.json(payload);
 }));
 
@@ -122,10 +135,12 @@ router.get('/businesses/:id', asyncHandler(async (req, res) => {
     },
   });
   if (!business) return res.status(404).json({ success: false, message: 'Business not found' });
-  const [paymentTotals, statusGroups, unitGroups, recentPayments, recentProviderTransactions] = await Promise.all([
+  const { from, to } = parseDateRange(req.query);
+  const [paymentTotals, statusGroups, unitGroups, dailyPayments, recentPayments, recentProviderTransactions] = await Promise.all([
     prisma.payment.aggregate({ where: { businessId, status: 'SUCCESS' }, _sum: { amount: true }, _count: true }),
     prisma.payment.groupBy({ by: ['status'], where: { businessId }, _count: true, _sum: { amount: true } }),
     prisma.payment.groupBy({ by: ['businessUnitId'], where: { businessId }, _count: true, _sum: { amount: true } }),
+    prisma.payment.findMany({ where: { businessId, status: 'SUCCESS', paidAt: { gte: from, lte: to } }, select: { amount: true, paidAt: true } }),
     prisma.payment.findMany({
       where: { businessId },
       orderBy: { createdAt: 'desc' },
@@ -162,6 +177,14 @@ router.get('/businesses/:id', asyncHandler(async (req, res) => {
     count: row._count,
     amount: Number(row._sum.amount || 0),
   }]));
+  const dayBuckets = {};
+  for (const payment of dailyPayments) {
+    const day = payment.paidAt.toISOString().slice(0, 10);
+    if (!dayBuckets[day]) dayBuckets[day] = { day, count: 0, amount: 0 };
+    dayBuckets[day].count += 1;
+    dayBuckets[day].amount += Number(payment.amount);
+  }
+  const trend = Object.values(dayBuckets).sort((a, b) => a.day.localeCompare(b.day));
 
   res.json({
     success: true,
@@ -169,6 +192,8 @@ router.get('/businesses/:id', asyncHandler(async (req, res) => {
     paymentTotals: { count: paymentTotals._count, amount: Number(paymentTotals._sum.amount || 0) },
     paymentStatusBreakdown,
     mainUnitTotals,
+    trend,
+    range: { from, to },
     recentPayments,
     recentProviderTransactions,
   });

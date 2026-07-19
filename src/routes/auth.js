@@ -9,7 +9,7 @@ const config = require('../config');
 const asyncHandler = require('../lib/asyncHandler');
 const { requireDashboardAuth } = require('../middleware/auth');
 const { isStrongPassword, passwordMessage } = require('../lib/password');
-const { sendActivationEmail, sendPasswordResetEmail, sendLoginOtpEmail } = require('../services/emailService');
+const { sendActivationEmail, sendPasswordResetEmail, sendLoginOtpEmail, sendSecurityAlertEmail } = require('../services/emailService');
 const { logger, safeError } = require('../lib/logger');
 const { buildFrontendUrl } = require('../lib/frontendUrl');
 
@@ -259,12 +259,18 @@ router.get('/me', requireDashboardAuth, asyncHandler(async (req, res) => {
 
 router.delete('/account', requireDashboardAuth, asyncHandler(async (req, res) => {
   const { password, confirm } = z.object({ password: z.string().optional(), confirm: z.literal('DELETE') }).parse(req.body);
-  const user = await prisma.user.findUnique({ where: { id: req.auth.sub } });
+  const user = await prisma.user.findUnique({ where: { id: req.auth.sub }, include: { business: { select: { name: true, supportEmail: true } } } });
   if (!user) return res.status(404).json({ success: false, message: 'Account not found.' });
   if (user.passwordHash && !(password && await bcrypt.compare(password, user.passwordHash))) {
     return res.status(401).json({ success: false, message: 'Incorrect password.' });
   }
   const remainingUsers = await prisma.user.count({ where: { businessId: user.businessId, id: { not: user.id } } });
+  if (user.business.supportEmail) {
+    sendSecurityAlertEmail({
+      email: user.business.supportEmail, businessName: user.business.name, action: 'Account deleted',
+      detail: `The account for ${user.name} (${maskEmail(user.email)}) was permanently deleted.${remainingUsers === 0 ? ' Since no other users remained, the entire business and all its data were deleted.' : ''}`,
+    }).catch(error => logger.error('Account deletion security alert failed', { event: 'SECURITY_ALERT_EMAIL_FAILED', requestId: req.id, businessId: user.businessId, ...safeError(error) }));
+  }
   if (remainingUsers === 0) {
     await prisma.business.delete({ where: { id: user.businessId } });
   } else {

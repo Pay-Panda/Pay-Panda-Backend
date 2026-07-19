@@ -207,6 +207,7 @@ model Payment {
   clientOrderId         String
   customerName          String?
   customerMobile        String?
+  customerEmail         String?
   amount                Decimal            @db.Decimal(14, 2)
   currency              String             @default("INR")
   reason                String?

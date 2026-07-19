@@ -3,7 +3,26 @@ const config = require('../config');
 const { decrypt } = require('../lib/crypto');
 const bharatpe = require('../providers/bharatpe');
 const { computePlatformFee } = require('./subscriptionService');
+const { sendPaymentReceiptEmail, sendPaymentReceivedEmail } = require('./emailService');
 const { logger, safeError } = require('../lib/logger');
+
+// Payment notification emails are best-effort side effects — never let a delivery failure
+// block or roll back a confirmed payment match.
+function notifyPaymentConfirmed(payment, business) {
+  const orderId = payment.clientOrderId;
+  if (payment.customerEmail) {
+    sendPaymentReceiptEmail({
+      email: payment.customerEmail, customerName: payment.customerName, businessName: business.name,
+      amount: payment.amount, orderId, bankReferenceNo: payment.bankReferenceNo, paidAt: payment.paidAt,
+    }).catch(error => logger.error('Payment receipt email failed', { event: 'PAYMENT_RECEIPT_EMAIL_FAILED', businessId: business.id, orderId, ...safeError(error) }));
+  }
+  if (business.supportEmail) {
+    sendPaymentReceivedEmail({
+      email: business.supportEmail, businessName: business.name, customerName: payment.customerName, customerMobile: payment.customerMobile,
+      amount: payment.amount, orderId, bankReferenceNo: payment.bankReferenceNo, paidAt: payment.paidAt,
+    }).catch(error => logger.error('Payment received notification email failed', { event: 'PAYMENT_NOTIFY_EMAIL_FAILED', businessId: business.id, orderId, ...safeError(error) }));
+  }
+}
 
 const liveChecks = new Map();
 let reconciliationRunning = false;
@@ -73,12 +92,13 @@ async function syncConnection(connection, { paymentId, windowStart, reason = 'MA
     try {
       const paidAt = new Date(Number(match.paymentTimestamp));
       const platformFeeAmount = await computePlatformFee(payment.businessId, paidAt);
-      await prisma.payment.update({ where: { id: payment.id }, data: {
+      const confirmed = await prisma.payment.update({ where: { id: payment.id }, data: {
         status: 'SUCCESS', providerTransactionId: String(match.id), bankReferenceNo: match.bankReferenceNo,
         internalUtr: match.internalUtr, payerName: match.payerName, payerHandle: match.payerHandle,
         paidAt, lastCheckedAt: now, platformFeeAmount,
       }});
       logger.info('Payment matched and confirmed', { event: 'PAYMENT_MATCHED', reason, businessId: payment.businessId, paymentId: payment.publicId, orderId: payment.clientOrderId, providerTransactionId: String(match.id), amount: Number(match.amount), bankReferenceNo: match.bankReferenceNo, payerName: match.payerName, payerHandle: match.payerHandle });
+      notifyPaymentConfirmed(confirmed, payment.business);
       claimed.add(String(match.id));
     } catch (error) { if (error.code !== 'P2002') throw error; }
   }

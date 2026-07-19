@@ -9,6 +9,7 @@ const router = express.Router();
 const schema = z.object({
   order_id: z.string().min(1).max(100), amount: z.coerce.number().positive().max(1000000),
   customer_name: z.string().max(100).optional(), customer_mobile: z.string().regex(/^\d{6,15}$/, 'Enter a valid mobile number (6 to 15 digits, no country code).').optional(),
+  customer_email: z.email().optional(),
   reason: z.string().max(180).optional(), remark1: z.string().max(200).optional(),
   remark2: z.string().max(200).optional(), redirect_url: z.url().optional(), connection_id: z.string().optional(),
   business_unit_id: z.string().optional(), business_unit_code: z.string().max(60).optional(),
@@ -109,7 +110,7 @@ function normalizeMobile(value) {
 function map(input) {
   return {
     orderId: input.order_id, amount: input.amount, customerName: input.customer_name,
-    customerMobile: input.customer_mobile, reason: input.reason, remark1: input.remark1,
+    customerMobile: input.customer_mobile, customerEmail: input.customer_email, reason: input.reason, remark1: input.remark1,
     remark2: input.remark2, redirectUrl: input.redirect_url, connectionId: input.connection_id,
     businessUnitId: input.business_unit_id, businessUnitCode: input.business_unit_code,
     expiresInMinutes: input.expires_in_minutes,

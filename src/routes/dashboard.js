@@ -7,6 +7,7 @@ const asyncHandler = require('../lib/asyncHandler');
 const { requireDashboardAuth } = require('../middleware/auth');
 const { expirePendingPayments } = require('../services/poller');
 const { TIERS } = require('../lib/feeTiers');
+const { parseDateRange } = require('../lib/dateRange');
 const subscriptionService = require('../services/subscriptionService');
 const { logger } = require('../lib/logger');
 
@@ -113,6 +114,62 @@ router.patch('/business-units/:id', asyncHandler(async (req, res) => {
   });
   logger.info('Business unit updated', { event: 'BUSINESS_UNIT_UPDATED', requestId: req.id, businessId: req.auth.businessId, businessUnitId: unit.id, active: unit.active });
   res.json({ success: true, unit });
+}));
+
+router.get('/insights', asyncHandler(async (req, res) => {
+  const businessId = req.auth.businessId;
+  const { from, to } = parseDateRange(req.query);
+  const unitId = req.query.business_unit_id || undefined;
+  if (unitId) {
+    const unit = await prisma.businessUnit.findFirst({ where: { id: unitId, businessId } });
+    if (!unit) return res.status(404).json({ success: false, message: 'Sub-business not found' });
+  }
+  const rangeWhere = { businessId, createdAt: { gte: from, lte: to }, ...(unitId ? { businessUnitId: unitId } : {}) };
+
+  const [statusGroups, successAgg, units, dailyPayments, unitStatusGroups] = await Promise.all([
+    prisma.payment.groupBy({ by: ['status'], where: rangeWhere, _count: true, _sum: { amount: true } }),
+    prisma.payment.aggregate({ where: { ...rangeWhere, status: 'SUCCESS' }, _sum: { amount: true }, _count: true, _avg: { amount: true } }),
+    prisma.businessUnit.findMany({ where: { businessId }, orderBy: { createdAt: 'asc' } }),
+    prisma.payment.findMany({ where: { ...rangeWhere, status: 'SUCCESS' }, select: { amount: true, paidAt: true, createdAt: true } }),
+    prisma.payment.groupBy({ by: ['businessUnitId', 'status'], where: { businessId, createdAt: { gte: from, lte: to } }, _count: true, _sum: { amount: true } }),
+  ]);
+
+  const byStatus = Object.fromEntries(statusGroups.map(row => [row.status, { count: row._count, amount: Number(row._sum.amount || 0) }]));
+  const totalCount = statusGroups.reduce((sum, row) => sum + row._count, 0);
+
+  const dayBuckets = {};
+  for (const payment of dailyPayments) {
+    const day = (payment.paidAt || payment.createdAt).toISOString().slice(0, 10);
+    if (!dayBuckets[day]) dayBuckets[day] = { day, count: 0, amount: 0 };
+    dayBuckets[day].count += 1;
+    dayBuckets[day].amount += Number(payment.amount);
+  }
+  const trend = Object.values(dayBuckets).sort((a, b) => a.day.localeCompare(b.day));
+
+  const unitMap = new Map(units.map(unit => [unit.id, { id: unit.id, name: unit.name, code: unit.code, amount: 0, successCount: 0, totalCount: 0 }]));
+  unitMap.set('__general__', { id: null, name: 'General (no sub-business)', code: null, amount: 0, successCount: 0, totalCount: 0 });
+  for (const row of unitStatusGroups) {
+    const key = row.businessUnitId || '__general__';
+    const bucket = unitMap.get(key);
+    if (!bucket) continue;
+    bucket.totalCount += row._count;
+    if (row.status === 'SUCCESS') { bucket.successCount += row._count; bucket.amount += Number(row._sum.amount || 0); }
+  }
+  const byUnit = Array.from(unitMap.values())
+    .filter(unit => unit.totalCount > 0)
+    .map(unit => ({ ...unit, successRate: unit.totalCount ? unit.successCount / unit.totalCount : 0 }))
+    .sort((a, b) => b.amount - a.amount);
+
+  res.json({
+    success: true,
+    range: { from, to },
+    summary: {
+      totalCount, successCount: successAgg._count, amount: Number(successAgg._sum.amount || 0),
+      avgAmount: Number(successAgg._avg.amount || 0),
+      successRate: totalCount ? successAgg._count / totalCount : 0,
+    },
+    byStatus, trend, byUnit,
+  });
 }));
 
 router.get('/provider-transactions', asyncHandler(async (req, res) => {
